@@ -1,3 +1,4 @@
+print('\nimporting\n')
 from typing import Optional
 
 import collections
@@ -23,6 +24,8 @@ import haiku as hk
 from acme.agents.jax import dqn
 from acme.jax import networks as networks_lib
 from acme.jax import utils
+
+print('\nmaking atari env func\n')
 
 def make_atari_environment(
     level: str = 'Pong',
@@ -62,6 +65,8 @@ def make_atari_environment(
 
     return wrappers.wrap_all(env, wrapper_list)
 
+print('\nmaking dqn network func\n')
+
 
 def make_dqn_atari_network(
     environment_spec: specs.EnvironmentSpec) -> dqn.DQNNetworks:
@@ -80,17 +85,19 @@ def make_dqn_atari_network(
     return dqn.DQNNetworks(policy_network=typed_network)
 
 
+print('\nmaking env func\n')
+
 def make_environment(seed: int) -> dm_env.Environment:
   # def environment_factory(seed: int) -> dm_env.Environment:
-  del seed
-  return make_atari_environment(
-      level=ENV_NAME,
-      sticky_actions=True,
-      zero_discount_on_life_loss=False,
-      oar_wrapper=True,
-      num_stacked_frames=1,
-      flatten_frame_stack=True,
-      grayscaling=False)  # environment = dm_suite.load('cartpole', 'balance')
+    del seed
+    return make_atari_environment(
+        level=ENV_NAME,
+        sticky_actions=True,
+        zero_discount_on_life_loss=False,
+        oar_wrapper=True,
+        num_stacked_frames=1,
+        flatten_frame_stack=True,
+        grayscaling=False)  # environment = dm_suite.load('cartpole', 'balance')
 
   # # Make the observations be a flat vector of all concatenated features.
   # environment = wrappers.ConcatObservationWrapper(environment)
@@ -103,7 +110,9 @@ def make_environment(seed: int) -> dm_env.Environment:
   # environment = wrappers.SinglePrecisionWrapper(environment)
   # print('\n\nenv made\n\n')
   # return environment
-  
+
+print('\nmaking network factory func\n')
+
 def network_factory(spec: specs.EnvironmentSpec) -> r2d2.R2D2Networks:
     return r2d2.make_atari_networks(
         spec,
@@ -111,13 +120,17 @@ def network_factory(spec: specs.EnvironmentSpec) -> r2d2.R2D2Networks:
         # policy_layer_sizes=(256, 256),
         # critic_layer_sizes=(256, 256),
     )
-    
+
+print('\nmaking config and builder\n')
+
 r2d2_config = r2d2.R2D2Config(learning_rate=3e-4)
 r2d2_builder = r2d2.R2D2Builder(r2d2_config)
 
 # Specify how to log training data: in this case keeping it in memory.
 # NOTE: We create a dict to hold the loggers so we can access the data after
 # the experiment has run.
+
+print('\nmaking logger dict and func\n')
 logger_dict = collections.defaultdict(loggers.InMemoryLogger)
 def logger_factory(
     name: str,
@@ -127,6 +140,7 @@ def logger_factory(
     del steps_key, task_id
     return logger_dict[name]
 
+print('\nmaking experiment config\n')
 
 experiment_config = experiments.ExperimentConfig(
     builder=r2d2_builder,
@@ -136,11 +150,13 @@ experiment_config = experiments.ExperimentConfig(
     seed=0,
     max_num_actor_steps=50_000)  # Each episode is 1000 steps.
 
+print('\nrunning experiment\n')
 experiments.run_experiment(
     experiment=experiment_config,
     eval_every=1000,
     num_eval_episodes=1)
 
+print('\nsuccess! running\n')
 df = pd.DataFrame(logger_dict['evaluator'].data)
 plt.figure(figsize=(10, 4))
 plt.title('Training episodes returns')
