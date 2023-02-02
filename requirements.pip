@@ -1,0 +1,8 @@
+# --upgrade pip setuptools wheel
+git+https://github.com/deepmind/acme.git#egg=dm-acme[jax,tf,envs]
+jupyter
+ipdb
+ipython
+numpy<1.24
+autorom[accept-rom-license]
+# --upgrade "jax[cuda]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
