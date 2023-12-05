@@ -1,0 +1,3 @@
+0,cartpole_gamma_sweep_1,.onager/scripts/cartpole_gamma_sweep_1/jobs.json
+1,cartpole_bigger_gamma_range_num_gamma_sweep_1,.onager/scripts/cartpole_bigger_gamma_range_num_gamma_sweep_1/jobs.json
+2,acrobot_sweep_1,.onager/scripts/acrobot_sweep_1/jobs.json
