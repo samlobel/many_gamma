@@ -76,7 +76,14 @@ class Args:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
-
+    constraint_loss_scale: float = 0.0
+    """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
+    # all_gammas: tuple[float] = (0.98, 0.99)
+    # all_gammas: str = "0.98,0.99"
+    gamma_lower: float = 0.98
+    gamma_upper: float = 0.99
+    num_gammas: int = 2
+    tag: str = ""
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -124,6 +131,205 @@ class QNetwork(nn.Module):
         return self.network(x / 255.0)
 
 
+from scipy import linalg
+
+def get_difference(known_gammas, coefficients, gamma_target, final_step = 1000):
+    # Numerically integrates upper and lower difference bounds.
+    # Pos diff is the most that combined could possibly be above target.
+    # Neg diff is the most that combined could possibly be below target.
+    def output(x):
+        v_combined = 0
+        for c, g in zip(coefficients, known_gammas):
+            v_combined += c * (g ** x)
+        return v_combined
+    x_axis = np.linspace(0, final_step, final_step + 1)
+    combined_output = output(x_axis)
+    target_output = gamma_target ** x_axis
+    diff = combined_output - target_output
+    allowed_above = np.maximum(diff, 0).sum()
+    allowed_below = -1 * np.minimum(diff, 0).sum()
+    assert allowed_below >= 0
+    assert allowed_above >= 0
+    return allowed_above, allowed_below
+
+
+def compute_coefficients(known_gammas: tuple, gamma_target: float):
+    A = []
+    b = []
+    for gamma_i in known_gammas:
+        A_i = [1 / (1 - gamma_i * gamma_j) for gamma_j in known_gammas]
+        b_i = 1 / (1 - gamma_i * gamma_target)
+        A.append(A_i)
+        b.append(b_i)
+
+    A = np.array(A, dtype=np.float64)
+    b = np.array(b, dtype=np.float64)
+    coefficients = linalg.solve(A, b).tolist()
+    # print(coefficients)
+    return coefficients
+
+def get_constraint_matrix(gammas):
+    gammas = np.array(gammas).tolist() # make it a list
+    matrix = []
+    for i in range(len(gammas)):
+        this_gamma = gammas[i]
+        other_gammas = gammas[:i] + gammas[i+1:]
+        coefficients = compute_coefficients(other_gammas, this_gamma)
+
+
+        coefficients = coefficients[:i] + [0] + coefficients[i:]
+        matrix.append(coefficients)
+
+    matrix = np.array(matrix)
+    assert np.max(matrix * np.eye(len(gammas))) == 0, "all should be zero"
+    return matrix
+
+def get_upper_and_lower_bounds(gammas, coefficient_matrix, final_step=10000):
+    allowed_aboves = []
+    allowed_belows = []
+    for i, coefficient_list in enumerate(coefficient_matrix):
+        gamma = gammas[i]
+        allowed_above, allowed_below = get_difference(gammas, coefficient_list, gamma, final_step=final_step)
+        allowed_aboves.append(allowed_above)
+        allowed_belows.append(allowed_below)
+
+    return np.array(allowed_aboves), np.array(allowed_belows)
+
+def get_even_spacing(gamma_small, gamma_big, total_points):
+    assert gamma_small < gamma_big
+    assert total_points >= 2
+    vmax_small = 1 / (1 - gamma_small)
+    vmax_big = 1 / (1 - gamma_big)
+    spaces = np.linspace(vmax_small, vmax_big, total_points)
+    inverted = 1 - 1 / spaces
+    return inverted.tolist()
+
+class ManyGammaQNetwork(nn.Module):
+    def __init__(self, env, gammas, main_gamma_index=-1):
+        assert len(gammas) >= 1
+        if not isinstance(gammas, (list, tuple)):
+            assert len(gammas.shape) == 1
+        self._gammas = torch.tensor(gammas, dtype=torch.float32)
+        self._main_gamma_index = main_gamma_index
+        self._num_actions = env.single_action_space.n
+        self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas), dtype=torch.float32)
+        self._upper_bounds, self._lower_bounds = get_upper_and_lower_bounds(gammas, self._constraint_matrix)
+        self._upper_bounds = torch.tensor(self._upper_bounds, dtype=torch.float32)
+        self._lower_bounds = torch.tensor(self._lower_bounds, dtype=torch.float32)
+
+
+        super().__init__()
+        # class Thing(nn.Module):
+        #     def forward(self, x):
+        #         return x * 0
+        
+        self.network = nn.Sequential(
+            nn.Conv2d(4, 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            # nn.Linear(512, env.single_action_space.n),
+            nn.Linear(512, len(gammas) * env.single_action_space.n),
+        )
+
+        # self.network = nn.Sequential(
+        #     nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+        #     nn.ReLU(),
+        #     nn.Linear(120, 84),
+        #     nn.ReLU(),
+        #     nn.Linear(84, len(gammas) * env.single_action_space.n),
+        #     # Thing(),
+        # )
+
+    # def forward(self, x):
+    #     return self.network(x / 255.0)
+    def forward(self, x):
+        # Now this returns all the values, reshaped so that each gamma has a vector of action-values
+        # Will this always be a batch? I don't really know but let's say yeah.
+        assert len(x.shape) == 4 # I think.
+        return self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
+    
+    def get_best_actions_and_values(self, x):
+        assert len(x.shape) == 4
+        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
+        output = self.forward(x)
+        assert len(output.shape) == 3
+        best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
+        assert best_actions.shape[0] == x.shape[0]
+        assert len(best_actions.shape) == 1
+        best_values = output[torch.arange(output.shape[0]), :, best_actions]
+        assert best_values.shape[0] == x.shape[0]
+        assert best_values.shape[1] == len(self._gammas)
+        assert len(best_values.shape) == 2
+        return best_actions, best_values
+
+    def get_values_for_action(self, x, actions):
+        assert len(x.shape) == 4
+        assert len(actions.shape) == 1
+        assert actions.shape[0] == x.shape[0]
+        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
+        output = self.forward(x)
+        assert len(output.shape) == 3
+        values = output[torch.arange(output.shape[0]), :, actions]
+        assert values.shape[0] == x.shape[0]
+        assert values.shape[1] == len(self._gammas)
+        assert len(values.shape) == 2
+        return values
+
+    def get_target_value(self, x, rewards, dones):
+        assert len(x.shape) == 4
+        assert rewards.shape[0] == x.shape[0]
+        assert dones.shape[0] == x.shape[0]
+        assert rewards.shape[1] == 1
+        assert dones.shape[1] == 1
+        assert len(rewards.shape) == 2
+        assert len(dones.shape) == 2
+        
+        _, best_values = self.get_best_actions_and_values(x)
+        target_values = data.rewards + self._gammas[None, :] * best_values * (1 - data.dones)
+        return target_values
+
+        # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
+
+    def get_constraint_computed_values_and_violations(self, x):
+        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
+        output = self.forward(x)
+
+        # import ipdb; ipdb.set_trace()
+        constraint_computed_output = torch.matmul(output.transpose(1, 2), self._constraint_matrix).transpose(1, 2)
+        assert constraint_computed_output.shape[0] == x.shape[0]
+        assert constraint_computed_output.shape[1] == len(self._gammas)
+        assert constraint_computed_output.shape[2] == self._num_actions
+
+        difference = constraint_computed_output - output
+        # difference = output -constraint_computed_output
+        ub = self._upper_bounds[None, :, None] # Sounds like 
+        lb = self._lower_bounds[None, :, None]
+        upper_violations = torch.maximum(difference - ub, torch.tensor(0, dtype=torch.float32))
+        # lower_violations = torch.maximum(lb - difference, torch.tensor(0, dtype=torch.float32))
+        # if lb is 3 and diff is positive, it should be 0.
+        # If lb is 3 and diff is -2, it should still be 0
+        # If lb is 3 and diff is -4, it should be 1. -lb - diff. Nice.
+        # Pretty much, the way I phrase my constraints was super confusing 
+        lower_violations = torch.maximum(-lb - difference, torch.tensor(0, dtype=torch.float32))
+        return {
+            'output': output, 
+            'constraint_computed_output': constraint_computed_output,
+            'upper_violations': upper_violations,
+            'lower_violations': lower_violations,
+        }
+
+
+
+    # def get_score_estimates(self, x, actions):
+
+
+
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
@@ -141,7 +347,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         )
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.tag:
+        run_name = args.tag
+    else:
+        run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+        # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.tag + '__' if args.tag else ''}{int(time.time())}"
+
     if args.track:
         import wandb
 
@@ -174,9 +387,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    q_network = QNetwork(envs).to(device)
+    # q_network = QNetwork(envs).to(device)
+    gammas = get_even_spacing(args.gamma_lower, args.gamma_upper, args.num_gammas)
+    q_network = ManyGammaQNetwork(envs, gammas).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = QNetwork(envs).to(device)
+    # target_network = QNetwork(envs).to(device)
+    target_network = ManyGammaQNetwork(envs, gammas).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
@@ -197,9 +413,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
-            q_values = q_network(torch.Tensor(obs).to(device))
-            actions = torch.argmax(q_values, dim=1).cpu().numpy()
-
+            # q_values = q_network(torch.Tensor(obs).to(device))
+            # actions = torch.argmax(q_values, dim=1).cpu().numpy()
+            actions = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[0].cpu().numpy()
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
@@ -226,20 +442,43 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
                 with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations).max(dim=1)
-                    td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
-                old_val = q_network(data.observations).gather(1, data.actions).squeeze()
-                loss = F.mse_loss(td_target, old_val)
+                    # Not max for all gammas, but action is max action for main gamma.
+                    # target_max_all_gammas = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[1].cpu().numpy()
+                    # target_max, _ = target_network(data.next_observations).max(dim=1)
+                    # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
+                    td_target = target_network.get_target_value(data.next_observations, data.rewards, data.dones)
+                    # raise Exception("Here")
+                    # td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
+                # old_val = q_network(data.observations).gather(1, data.actions).squeeze()
+                old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze())
+                # raise Exception("here")
+                td_loss = F.mse_loss(td_target, old_val)
+
+                violation_dict = q_network.get_constraint_computed_values_and_violations(data.observations)
+                upper_violations = violation_dict['upper_violations']
+                lower_violations = violation_dict['lower_violations']
+                # import ipdb; ipdb.set_trace()
+                # td_loss = loss
+                # constraint_loss = (upper_violations.mean() + lower_violations.mean())
+                constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
+                if args.constraint_loss_scale > 0:
+                    total_loss = td_loss + args.constraint_loss_scale * constraint_loss
+                else:
+                    total_loss = td_loss
 
                 if global_step % 100 == 0:
-                    writer.add_scalar("losses/td_loss", loss, global_step)
+                    # writer.add_scalar("losses/td_loss", loss, global_step)
+                    writer.add_scalar("losses/td_loss", td_loss, global_step)
+                    writer.add_scalar("losses/total_loss", total_loss, global_step)
+                    # if args.constraint_loss_scale > 0:
+                    writer.add_scalar("losses/constraint_loss", constraint_loss, global_step)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
                 # optimize the model
                 optimizer.zero_grad()
-                loss.backward()
+                total_loss.backward()
                 optimizer.step()
 
             # update target network
