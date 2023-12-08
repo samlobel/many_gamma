@@ -131,6 +131,7 @@ class QNetwork(nn.Module):
         return self.network(x / 255.0)
 
 
+
 from scipy import linalg
 
 def get_difference(known_gammas, coefficients, gamma_target, final_step = 1000):
@@ -209,7 +210,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
             assert len(gammas.shape) == 1
-        self._gammas = torch.tensor(gammas, dtype=torch.float32)
+        self._gammas = torch.tensor(gammas, dtype=torch.float32).to(device)
         self._main_gamma_index = main_gamma_index
         self._num_actions = env.single_action_space.n
         self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas), dtype=torch.float32)
@@ -245,6 +246,15 @@ class ManyGammaQNetwork(nn.Module):
         #     nn.Linear(84, len(gammas) * env.single_action_space.n),
         #     # Thing(),
         # )
+
+    def to(self, *args, **kwargs):
+        self = super().to(*args, **kwargs)
+        self._gammas = self._gammas.to(*args, **kwargs)
+        self._constraint_matrix = self._constraint_matrix.to(*args, **kwargs)
+        self._upper_bounds = self._upper_bounds.to(*args, **kwargs)
+        self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
+        return self
+
 
     # def forward(self, x):
     #     return self.network(x / 255.0)
@@ -291,7 +301,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(dones.shape) == 2
         
         _, best_values = self.get_best_actions_and_values(x)
-        target_values = data.rewards + self._gammas[None, :] * best_values * (1 - data.dones)
+        target_values = rewards + self._gammas[None, :] * best_values * (1 - dones)
         return target_values
 
         # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
