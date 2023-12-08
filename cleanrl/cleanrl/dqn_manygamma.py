@@ -211,6 +211,14 @@ class ManyGammaQNetwork(nn.Module):
             # Thing(),
         )
 
+    def to(self, *args, **kwargs):
+        self = super().to(*args, **kwargs)
+        self._gammas = self._gammas.to(*args, **kwargs)
+        self._constraint_matrix = self._constraint_matrix.to(*args, **kwargs)
+        self._upper_bounds = self._upper_bounds.to(*args, **kwargs)
+        self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
+        return self
+
     def forward(self, x):
         # Now this returns all the values, reshaped so that each gamma has a vector of action-values
         # Will this always be a batch? I don't really know but let's say yeah.
@@ -252,7 +260,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(dones.shape) == 2
         
         _, best_values = self.get_best_actions_and_values(x)
-        target_values = data.rewards + self._gammas[None, :] * best_values * (1 - data.dones)
+        target_values = rewards + self._gammas[None, :] * best_values * (1 - dones)
         return target_values
 
         # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
