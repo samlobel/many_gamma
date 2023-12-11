@@ -3,6 +3,8 @@ import os
 import random
 import time
 from dataclasses import dataclass
+import pickle
+from collections import defaultdict
 
 import gymnasium as gym
 import numpy as np
@@ -84,9 +86,11 @@ class Args:
     gamma_upper: float = 0.99
     num_gammas: int = 2
     tag: str = ""
+    log_dir: str = "runs"
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
+        # TODO: Do I want this part changed to use something more like run_dir? Not sure how that will effect things like w&b
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
@@ -210,7 +214,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
             assert len(gammas.shape) == 1
-        self._gammas = torch.tensor(gammas, dtype=torch.float32).to(device)
+        self._gammas = torch.tensor(gammas, dtype=torch.float32)
         self._main_gamma_index = main_gamma_index
         self._num_actions = env.single_action_space.n
         self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas), dtype=torch.float32)
@@ -377,7 +381,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
+    write_dir = os.path.join(args.log_dir, run_name)
+    # writer = SummaryWriter(f"runs/{run_name}")
+    writer = SummaryWriter(write_dir)
+    pkl_log_path = os.path.join(write_dir, "log_dict.pkl")
+    log_dict = defaultdict(list)
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -436,6 +444,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                    log_dict['episodic_return'].append((global_step, info["episode"]["r"].item()))
+                    log_dict['episodic_length'].append((global_step, info["episode"]["l"].item()))
+                    with open(pkl_log_path, 'wb') as f:
+                        pickle.dump(log_dict, f)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
@@ -485,6 +497,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                    log_dict['td_loss'].append((global_step, td_loss.item()))
+                    log_dict['total_loss'].append((global_step, total_loss.item()))
+                    log_dict['constraint_loss'].append((global_step, constraint_loss.item()))
+                    log_dict['q_values'].append((global_step, old_val.mean().item()))
+                    log_dict['SPS'].append((global_step, int(global_step / (time.time() - start_time))))
 
                 # optimize the model
                 optimizer.zero_grad()
@@ -499,7 +516,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     )
 
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        # model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        # TODO: my changes here are untested.
+        # model_path = f"{write_dir}.cleanrl_model"
+        model_path = os.path.join(write_dir, f"{args.exp_name}.cleanrl_model")
+        # model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model" 
         torch.save(q_network.state_dict(), model_path)
         print(f"model saved to {model_path}")
         from cleanrl_utils.evals.dqn_eval import evaluate
@@ -522,7 +543,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
             repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
             repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
+            # push_to_hub(args, episodic_returns, repo_id, "DQN", f"runs/{run_name}", f"videos/{run_name}-eval")
+            push_to_hub(args, episodic_returns, repo_id, "DQN", write_dir, f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()
