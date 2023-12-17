@@ -446,8 +446,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                     log_dict['episodic_return'].append((global_step, info["episode"]["r"].item()))
                     log_dict['episodic_length'].append((global_step, info["episode"]["l"].item()))
+                    pkl_write_start = time.time()
                     with open(pkl_log_path, 'wb') as f:
                         pickle.dump(log_dict, f)
+                    print(f"pkl write time: {time.time() - pkl_write_start:.4f}s")
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
