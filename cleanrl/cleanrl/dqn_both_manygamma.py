@@ -25,7 +25,72 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 @dataclass
-class Args:
+class ArgsClassic:
+    exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    """the name of this experiment"""
+    seed: int = 1
+    """seed of the experiment"""
+    torch_deterministic: bool = True
+    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    cuda: bool = True
+    """if toggled, cuda will be enabled by default"""
+    track: bool = False
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_project_name: str = "cleanRL"
+    """the wandb's project name"""
+    wandb_entity: str = None
+    """the entity (team) of wandb's project"""
+    capture_video: bool = False
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    save_model: bool = False
+    """whether to save model into the `runs/{run_name}` folder"""
+    upload_model: bool = False
+    """whether to upload the saved model to huggingface"""
+    hf_entity: str = ""
+    """the user or org name of the model repository from the Hugging Face Hub"""
+
+    # Algorithm specific arguments
+    env_id: str = "CartPole-v1"
+    """the id of the environment"""
+    total_timesteps: int = 500000
+    """total timesteps of the experiments"""
+    learning_rate: float = 2.5e-4
+    """the learning rate of the optimizer"""
+    num_envs: int = 1
+    """the number of parallel game environments"""
+    buffer_size: int = 10000
+    """the replay memory buffer size"""
+    gamma: float = 0.99
+    """the discount factor gamma"""
+    tau: float = 1.0
+    """the target network update rate"""
+    target_network_frequency: int = 500
+    """the timesteps it takes to update the target network"""
+    batch_size: int = 128
+    """the batch size of sample from the reply memory"""
+    start_e: float = 1
+    """the starting epsilon for exploration"""
+    end_e: float = 0.05
+    """the ending epsilon for exploration"""
+    exploration_fraction: float = 0.5
+    """the fraction of `total-timesteps` it takes from start-e to go end-e"""
+    learning_starts: int = 10000
+    """timestep to start learning"""
+    train_frequency: int = 10
+    """the frequency of training"""
+    constraint_loss_scale: float = 0.0
+    """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
+    # all_gammas: tuple[float] = (0.98, 0.99)
+    # all_gammas: str = "0.98,0.99"
+    gamma_lower: float = 0.98
+    gamma_upper: float = 0.99
+    num_gammas: int = 2
+    tag: str = ""
+    log_dir: str = "runs"
+    is_atari: bool = False
+
+@dataclass
+class ArgsAtari:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
@@ -87,9 +152,13 @@ class Args:
     num_gammas: int = 2
     tag: str = ""
     log_dir: str = "runs"
+    is_atari: bool = False
 
-def make_env(env_id, seed, idx, capture_video, run_name):
-    def thunk():
+
+
+
+def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
+    def thunk_atari():
         # TODO: Do I want this part changed to use something more like run_dir? Not sure how that will effect things like w&b
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
@@ -110,8 +179,19 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
         env.action_space.seed(seed)
         return env
+    
+    def thunk_flat():
+        # TODO: Do I want this part changed to use something more like run_dir? Not sure how that will effect things like w&b
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env.action_space.seed(seed)
+        return env
 
-    return thunk
+    return thunk_atari if is_atari else thunk_flat
 
 
 # ALGO LOGIC: initialize agent here:
@@ -214,6 +294,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
             assert len(gammas.shape) == 1
+        self._observation_space_shape = env.single_observation_space.shape
         self._gammas = torch.tensor(gammas, dtype=torch.float32)
         self._main_gamma_index = main_gamma_index
         self._num_actions = env.single_action_space.n
@@ -228,28 +309,7 @@ class ManyGammaQNetwork(nn.Module):
         #     def forward(self, x):
         #         return x * 0
         
-        self.network = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(3136, 512),
-            nn.ReLU(),
-            # nn.Linear(512, env.single_action_space.n),
-            nn.Linear(512, len(gammas) * env.single_action_space.n),
-        )
-
-        # self.network = nn.Sequential(
-        #     nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
-        #     nn.ReLU(),
-        #     nn.Linear(120, 84),
-        #     nn.ReLU(),
-        #     nn.Linear(84, len(gammas) * env.single_action_space.n),
-        #     # Thing(),
-        # )
+        self.network = self._make_network(env, len(gammas))
 
     def to(self, *args, **kwargs):
         self = super().to(*args, **kwargs)
@@ -259,20 +319,53 @@ class ManyGammaQNetwork(nn.Module):
         self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
         return self
 
+    def _make_network(self, env, num_gammas):
+        observation_shape = env.single_observation_space.shape
+        assert len(observation_shape) in (1, 3)
+        if len(observation_shape) == 1:
+            print("Flat NN")
+            return nn.Sequential(
+                nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+                nn.ReLU(),
+                nn.Linear(120, 84),
+                nn.ReLU(),
+                nn.Linear(84, num_gammas * env.single_action_space.n),
+            )
+        else:
+            print("Conv NN")
+            return nn.Sequential(
+                nn.Conv2d(4, 32, 8, stride=4),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, 4, stride=2),
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, stride=1),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(3136, 512),
+                nn.ReLU(),
+                # nn.Linear(512, env.single_action_space.n),
+                nn.Linear(512, num_gammas * env.single_action_space.n),
+            )
+        
+
 
     # def forward(self, x):
     #     return self.network(x / 255.0)
     def forward(self, x):
         # Now this returns all the values, reshaped so that each gamma has a vector of action-values
         # Will this always be a batch? I don't really know but let's say yeah.
-        assert len(x.shape) == 4 # I think.
-        return self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
+        if len(self._observation_space_shape) == 3:
+            assert len(x.shape) == 4
+            return self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
+        else:
+            assert len(x.shape) == 2
+            return self.network(x).view(-1, len(self._gammas), self._num_actions)
     
     def get_best_actions_and_values(self, x):
-        assert len(x.shape) == 4
+        # assert len(x.shape) == 4
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
         output = self.forward(x)
-        assert len(output.shape) == 3
+        # assert len(output.shape) == len(x.shape) + 1
         best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
         assert best_actions.shape[0] == x.shape[0]
         assert len(best_actions.shape) == 1
@@ -283,7 +376,6 @@ class ManyGammaQNetwork(nn.Module):
         return best_actions, best_values
 
     def get_values_for_action(self, x, actions):
-        assert len(x.shape) == 4
         assert len(actions.shape) == 1
         assert actions.shape[0] == x.shape[0]
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
@@ -296,7 +388,7 @@ class ManyGammaQNetwork(nn.Module):
         return values
 
     def get_target_value(self, x, rewards, dones):
-        assert len(x.shape) == 4
+        # assert len(x.shape) == 4
         assert rewards.shape[0] == x.shape[0]
         assert dones.shape[0] == x.shape[0]
         assert rewards.shape[1] == 1
@@ -359,7 +451,10 @@ if __name__ == "__main__":
 poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-license]==0.28.1"  "ale-py==0.8.1" 
 """
         )
-    args = tyro.cli(Args)
+    args = tyro.cli(ArgsClassic)
+    if args.is_atari:
+        args = tyro.cli(ArgsAtari) # Different defaults
+
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -401,7 +496,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, is_atari=args.is_atari) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -527,9 +622,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         print(f"model saved to {model_path}")
         from cleanrl_utils.evals.dqn_eval import evaluate
 
+        import functools
+        make_env_atarid = functools.partial(make_env, is_atari=args.is_atari)
+
         episodic_returns = evaluate(
             model_path,
-            make_env,
+            make_env_atarid,
             args.env_id,
             eval_episodes=10,
             run_name=f"{run_name}-eval",
