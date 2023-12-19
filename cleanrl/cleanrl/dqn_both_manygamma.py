@@ -83,11 +83,19 @@ class ArgsClassic:
     # all_gammas: tuple[float] = (0.98, 0.99)
     # all_gammas: str = "0.98,0.99"
     gamma_lower: float = 0.98
+    """Smallest of the evenly-spaced Gammas"""
     gamma_upper: float = 0.99
+    """Largest of the evenly-spaced Gammas"""
     num_gammas: int = 2
+    """How many gammas to train"""
     tag: str = ""
+    """Directory name for experiment"""
     log_dir: str = "runs"
+    """One above directory name for experiment"""
     is_atari: bool = False
+    """Determines Network Shape etc"""
+    semigradient_constraint: bool = False
+    """If true, detaches constraints in constraint loss"""
 
 @dataclass
 class ArgsAtari:
@@ -148,11 +156,19 @@ class ArgsAtari:
     # all_gammas: tuple[float] = (0.98, 0.99)
     # all_gammas: str = "0.98,0.99"
     gamma_lower: float = 0.98
+    """Smallest of the evenly-spaced Gammas"""
     gamma_upper: float = 0.99
+    """Largest of the evenly-spaced Gammas"""
     num_gammas: int = 2
+    """How many gammas to train"""
     tag: str = ""
+    """Directory name for experiment"""
     log_dir: str = "runs"
+    """One above directory name for experiment"""
     is_atari: bool = False
+    """Determines Network Shape etc"""
+    semigradient_constraint: bool = False
+    """If true, detaches constraints in constraint loss"""
 
 
 
@@ -402,7 +418,7 @@ class ManyGammaQNetwork(nn.Module):
 
         # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
 
-    def get_constraint_computed_values_and_violations(self, x):
+    def get_constraint_computed_values_and_violations(self, x, semi_gradient=False):
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
         output = self.forward(x)
 
@@ -411,6 +427,11 @@ class ManyGammaQNetwork(nn.Module):
         assert constraint_computed_output.shape[0] == x.shape[0]
         assert constraint_computed_output.shape[1] == len(self._gammas)
         assert constraint_computed_output.shape[2] == self._num_actions
+
+        if semi_gradient:
+            # In this case we only want to send the outputs towards the constraints.
+            # I think this makes more sense.
+            constraint_computed_output = constraint_computed_output.detach()
 
         difference = constraint_computed_output - output
         # difference = output -constraint_computed_output
@@ -557,6 +578,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         obs = next_obs
 
         # ALGO LOGIC: training.
+        # TODO: Have methods take in the result of forward, so I don't have to recompute, should save me ~25% compute.
+        # TODO: add DDQN feature, in case helpful.
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
@@ -573,7 +596,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 # raise Exception("here")
                 td_loss = F.mse_loss(td_target, old_val)
 
-                violation_dict = q_network.get_constraint_computed_values_and_violations(data.observations)
+                violation_dict = q_network.get_constraint_computed_values_and_violations(
+                    data.observations, semi_gradient=args.semigradient_constraint)
                 upper_violations = violation_dict['upper_violations']
                 lower_violations = violation_dict['lower_violations']
                 # import ipdb; ipdb.set_trace()
