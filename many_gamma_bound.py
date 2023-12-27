@@ -5,8 +5,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import linalg
+import math
 
-def compute_coefficients(known_gammas: tuple, gamma_target: float):
+def compute_coefficients(known_gammas: tuple, gamma_target: float, lstsq=False, regularization=0.0):
     A = []
     b = []
     for gamma_i in known_gammas:
@@ -17,17 +18,25 @@ def compute_coefficients(known_gammas: tuple, gamma_target: float):
 
     A = np.array(A, dtype=np.float64)
     b = np.array(b, dtype=np.float64)
-    coefficients = linalg.solve(A, b).tolist()
-    print(coefficients)
+    if regularization:
+        A += regularization * np.eye(len(known_gammas))
+        # A += regularization * np.diag(1 / (1 - np.array(known_gammas))) * (1 / (1 - np.array(known_gammas))).mean()
+        ## I did need eye I think. A += regularization # I don't think we need the eye thing here, we want to regularize each term.
+
+    if lstsq:
+        coefficients = linalg.lstsq(A, b)[0].tolist()
+    else:
+        coefficients = linalg.solve(A, b).tolist()
+    # print(coefficients)
     return coefficients
 
-def get_constraint_matrix(gammas):
+def get_constraint_matrix(gammas, lstsq=False, regularization=0.0):
     gammas = np.array(gammas).tolist() # make it a list
     matrix = []
     for i in range(len(gammas)):
         this_gamma = gammas[i]
         other_gammas = gammas[:i] + gammas[i+1:]
-        coefficients = compute_coefficients(other_gammas, this_gamma)
+        coefficients = compute_coefficients(other_gammas, this_gamma, lstsq=lstsq, regularization=regularization)
 
 
         coefficients = coefficients[:i] + [0] + coefficients[i:]
@@ -35,6 +44,16 @@ def get_constraint_matrix(gammas):
 
     matrix = np.array(matrix)
     assert np.max(matrix * np.eye(len(gammas))) == 0, "all should be zero"
+    return matrix
+
+def get_constraint_matrix_rectangular(known_gammas, gammas_to_approximate, lstsq=True, regularization=0.0):
+    gammas = np.array(known_gammas).tolist() # make it a list
+    matrix = []
+    for i in range(len(gammas_to_approximate)):
+        coefficients = compute_coefficients(known_gammas, gammas_to_approximate[i], lstsq=lstsq, regularization=regularization)
+        matrix.append(coefficients)
+
+    matrix = np.array(matrix)
     return matrix
 
 
@@ -107,6 +126,9 @@ def get_difference(known_gammas, coefficients, gamma_target, final_step = 1000):
     # Pos diff is the most that combined could possibly be above target.
     # Neg diff is the most that combined could possibly be below target.
     # everything should be positive
+    # print(len(known_gammas))
+    # print(len(coefficients))
+    assert len(known_gammas) == len(coefficients), f"{len(known_gammas)} != {len(coefficients)}"
     def output(x):
         v_combined = 0
         for c, g in zip(coefficients, known_gammas):
@@ -130,6 +152,18 @@ def get_even_spacing(gamma_small, gamma_big, total_points):
     inverted = 1 - 1 / spaces
     return inverted.tolist()
 
+def get_even_log_spacing(gamma_small, gamma_big, total_points):
+    # Feels sort of natural, even spacing in log space of 1 - gamma.
+    # Lets you do 0 but not 1, which is right.
+    assert gamma_small < gamma_big
+    assert total_points >= 2
+    log_big = np.log(1 - gamma_big)
+    log_small = np.log(1 - gamma_small)
+    spaces = np.linspace(log_small, log_big, total_points)
+    inverted = 1 - np.exp(spaces)
+    return inverted.tolist()
+
+
 def get_upper_and_lower_bounds(gammas, coefficient_matrix, final_step=10000):
     allowed_aboves = []
     allowed_belows = []
@@ -142,11 +176,132 @@ def get_upper_and_lower_bounds(gammas, coefficient_matrix, final_step=10000):
     return np.array(allowed_aboves), np.array(allowed_belows)
 
 
+def _make_plots(gamma_to_estimate, num_points, regularization):
+    print("gamma_to_estimate", gamma_to_estimate, "num_points", num_points, "regularization", regularization)
+    points = np.linspace(0.0, 0.9990, num_points)
+    coefficients = compute_coefficients(points, gamma_to_estimate, regularization=regularization)
+    plt.plot(points, coefficients)
+    plt.title(f"Summed coefficients for reg={regularization}: " + str(sum(coefficients)))
+    plt.show()
+
+def _get_recreation_for_spacing(num_points=10, regularization=0., start=0., end=0.999, gammas=None):
+    # See how well it recreates various things.
+    # I should look at a whole range of things. That would be more informative wouldn't it.
+    # I'll look at the size of constraints first.
+    # uniform_points = np.linspace(0.0, 0.9990, num_points)
+    gammas = gammas or get_even_spacing(start, end, num_points)
+    # gammas = np.linspace(start, end, num_points)
+
+    # recreation_targets = np.linspace(0.0, 0.999, 1000)
+    # recreation_targets = np.linspace(0.9, 0.999, 1000)
+    recreation_targets = np.linspace(0.97, 0.997, 100)
+    # import ipdb; ipdb.set_trace()
+    coefficients_even = [compute_coefficients(gammas, rt, regularization=regularization) for rt in recreation_targets]
+    # coefficients_uniform = [compute_coefficients(uniform_points, rt, regularization=regularization) for rt in recreation_targets]
+    difference_even = [sum(get_difference(gammas, c, rt)) for c, rt in zip(coefficients_even, recreation_targets)]
+    # difference_uniform = [sum(get_difference(uniform_points, c, rt)) for c, rt in zip(coefficients_uniform, recreation_targets)]
+    plt.plot(recreation_targets, difference_even, label="Even Spacing")
+    # plt.plot(recreation_targets, difference_uniform, label="Uniform Spacing")
+    # plt.xscale("log")
+    plt.legend()
+    plt.show()
+
+    pass
+
+def compare_spacings():
+    # For perfect solver, how do different input spacings compare?
+    regularization = 1.0
+    lower, upper, num = 0.8, 0.997, 100
+    linspace_spacing = np.linspace(lower, upper, num)
+    even_spacing = np.array(get_even_spacing(lower, upper, num))
+    log_spacing = np.array(get_even_log_spacing(lower, upper, num))
+
+    gamma_targets = np.linspace(0.8, 0.997, 1000)
+
+    coefficients_linspace = [compute_coefficients(linspace_spacing, gt, regularization=regularization) for gt in gamma_targets]
+    coefficients_even = [compute_coefficients(even_spacing, gt, regularization=regularization) for gt in gamma_targets]
+    coefficients_log = [compute_coefficients(log_spacing, gt, regularization=regularization) for gt in gamma_targets]
+
+    difference_linspace = [sum(get_difference(linspace_spacing, c, gt)) for c, gt in zip(coefficients_linspace, gamma_targets)]
+    difference_even = [sum(get_difference(even_spacing, c, gt)) for c, gt in zip(coefficients_even, gamma_targets)]
+    difference_log = [sum(get_difference(log_spacing, c, gt)) for c, gt in zip(coefficients_log, gamma_targets)]
+
+    plt.plot(gamma_targets, np.array(difference_linspace) * (1 - gamma_targets), label="Linspace")
+    plt.plot(gamma_targets, np.array(difference_even) * (1 - gamma_targets), label="Even Spacing")
+    plt.plot(gamma_targets, np.array(difference_log) * (1 - gamma_targets), label="Log Spacing")
+
+    # plt.plot(gamma_targets, difference_linspace, label="Linspace")
+    # plt.plot(gamma_targets, difference_even, label="Even Spacing")
+    # plt.plot(gamma_targets, difference_log, label="Log Spacing")
+    plt.legend()
+    plt.show()
+
+
+def _silly():
+    # So maybe I want to constrain it so that it always adds up to 1? Seems reasonable.
+    # But then it feels like it'll obviously not be a linear equation.
+    print(compute_coefficients([0.9], 0.9, regularization=0.1))
+
 
 
 if __name__ == '__main__':
-    pass
-    # even_spaced = get_even_spacing(0.9, 0.99, 8)[:-1]
+    compare_spacings()
+    exit()
+    # for regularization in [1e2, 1e1, 1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5]:
+    # _silly()
+    # exit()
+    gammas = [0.97, 0.971, 0.982, 0.982, 0.9835, 0.99, 0.991, 0.9915, 0.995, 0.995, 0.996, 0.9968, 0.997]
+    _get_recreation_for_spacing(gammas=gammas, regularization=0.1, start = 0.97, end=0.997)
+    # _get_recreation_for_spacing(10, regularization=0.1, start = 0.97, end=0.997)
+    exit()
+    # _make_plots(0.5, 1000, regularization=0)
+    # for num_points in [10, 30, 100, 300, 1000, 3000]:
+    #     _make_plots(0.5, num_points, regularization=1.0)
+    # exit()
+    # for regularization_exponent in list(range(-5, 5)):
+    #     regularization = 10**regularization_exponent
+    #     _make_plots(0.5, 1000, regularization=regularization)
+    # exit()
+    for i in range(20, 21, 5):
+    # for i in range(29, 30):
+        for regularization in [1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-10, 0]:
+            print(i, regularization)
+            # even_spaced = get_even_spacing(0.9, 0.99, i)
+            even_spaced = get_even_spacing(0.1, 0.99, i)
+            constraint_matrix_solve = get_constraint_matrix(even_spaced, lstsq=False, regularization=regularization)
+            constraint_matrix_lstsq = get_constraint_matrix(even_spaced, lstsq=True, regularization=regularization)
+            print(np.array(constraint_matrix_lstsq).sum(axis=0))
+            print(np.array(constraint_matrix_lstsq).sum(axis=1))
+            continue
+
+            biggest_diff = np.abs(np.array(constraint_matrix_lstsq) - np.array(constraint_matrix_solve)).max()
+            upper_bounds_solve, lower_bounds_solve = get_upper_and_lower_bounds(even_spaced, constraint_matrix_solve)
+            upper_bounds_lstsq, lower_bounds_lstsq = get_upper_and_lower_bounds(even_spaced, constraint_matrix_lstsq)
+
+            print("biggest diff: ", biggest_diff)
+            print("min max solve: ", np.array(constraint_matrix_solve).min(), np.array(constraint_matrix_solve).max())
+            print("min max lstsq: ", np.array(constraint_matrix_lstsq).min(), np.array(constraint_matrix_lstsq).max())
+            print("upper bounds solve", upper_bounds_solve)
+            print("upper bounds lstsq", upper_bounds_lstsq)            
+    exit()
+
+    # for i in range(29, 30):
+    #     print(i)
+    #     even_spaced = get_even_spacing(0.9, 0.99, i)
+    #     print(even_spaced)
+    #     constraint_matrix_solve = get_constraint_matrix(even_spaced, lstsq=False)
+    #     constraint_matrix_lstsq = get_constraint_matrix(even_spaced, lstsq=True)
+    #     biggest_diff = np.abs(np.array(constraint_matrix_lstsq) - np.array(constraint_matrix_solve)).max()
+    #     upper_bounds_solve, lower_bounds_solve = get_upper_and_lower_bounds(even_spaced, constraint_matrix_solve)
+    #     upper_bounds_lstsq, lower_bounds_lstsq = get_upper_and_lower_bounds(even_spaced, constraint_matrix_lstsq)
+
+    #     print("biggest diff: ", biggest_diff)
+    #     print("min max solve: ", np.array(constraint_matrix_solve).min(), np.array(constraint_matrix_solve).max())
+    #     print("min max lstsq: ", np.array(constraint_matrix_lstsq).min(), np.array(constraint_matrix_lstsq).max())
+    #     print("upper bounds solve", upper_bounds_solve)
+    #     print("upper bounds lstsq", upper_bounds_lstsq)
+    #     print(constraint_matrix_lstsq)
+        
     # make_comparison_plot(even_spaced, 0.99, title="Many even spaced 0.99", save_path="./plots/many_gamma/many_even_spaced_0.99.png", write_coefficients=True)
     # even_spaced = get_even_spacing(0.9, 0.99, 8)[:-1]
     # vals = get_even_spacing(0.9, 0.95, 3)[:-1] + get_even_spacing(0.95, 0.975, 3)[1:]
