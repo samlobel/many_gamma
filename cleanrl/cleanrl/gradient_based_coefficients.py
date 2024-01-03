@@ -12,25 +12,34 @@ from gamma_utilities import *
 class CoefficientsModule(nn.Module):
     # I think for this its okay to say we're approximating the same gammas as we know 
     # Let's make optimization its own thing.
-    def __init__(self, gammas, regularization=0., zero_diagonal=False):
+    def __init__(self, gammas, regularization=0., skip_self_map=False, only_from_lower=False):
         super().__init__()
         self.gammas = torch.Tensor(gammas)
+        assert torch.allclose(self.gammas, torch.sort(self.gammas)[0])
         # self.gammas_to_approximate = torch.Tensor(gammas_to_approximate)
         self.regularization = regularization
-        self._zero_diagonal = zero_diagonal
+        self._skip_self_map = skip_self_map
+        self._only_from_lower = only_from_lower # upper diagonal
         # TODO: Try out different initializations perhaps.
         # To start, initialize to L2 solution.
-        perfect_l2_coefficients = get_constraint_matrix(gammas, regularization=regularization, skip_self_map=zero_diagonal)
+        perfect_l2_coefficients = get_constraint_matrix(gammas, regularization=regularization, skip_self_map=skip_self_map, only_from_lower=only_from_lower)
         perfect_l2_coefficients = perfect_l2_coefficients.T # Need to transpose it sadly. TODO: Make correct off bat?
         perfect_l2_coefficients = perfect_l2_coefficients.astype(np.float32)
         self._unzeroed_coefficients = nn.Parameter(torch.tensor(perfect_l2_coefficients)) # Zeroed comes later.
 
     @property
     def coefficients(self):
-        if self._zero_diagonal:
-            return self._unzeroed_coefficients * (1 - torch.eye(len(self.gammas)))
-        else:
+        # Ugh, remember that its transposed. So now the first column is almost all zeros, not the first row.
+        if self._skip_self_map and self._only_from_lower:
+                return torch.triu(self._unzeroed_coefficients, 1)
+        elif self._skip_self_map and not self._only_from_lower:
+                return self._unzeroed_coefficients * (1 - torch.eye(len(self.gammas)))
+        elif not self._skip_self_map and self._only_from_lower:
+            return torch.triu(self._unzeroed_coefficients, 0)
+        elif not self._skip_self_map and not self._only_from_lower:
             return self._unzeroed_coefficients
+        else:
+            raise Exception("Shouldn't be here.")
 
     def get_coefficients(self):
         return self.coefficients.detach().numpy()
@@ -82,7 +91,7 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     gammas = get_even_spacing(0.9, 0.997, 50)
     regularization = 1.
-    trainer = CoefficientsModule(gammas, regularization=regularization, zero_diagonal=True)
+    trainer = CoefficientsModule(gammas, regularization=regularization, skip_self_map=True)
     # log_dict = trainer.solve(10001, lr=0.0001)
     for lr in [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]:
         log_dict = trainer.solve(4001, lr=lr)

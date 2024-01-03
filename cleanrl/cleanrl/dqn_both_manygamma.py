@@ -107,6 +107,12 @@ class ArgsClassic:
     """Either `l2` or `abs`, determines whether we do the analytic solution or gradient based solution."""
     gamma_spacing: str = "even"
     """Even, log, or linear."""
+    only_from_lower: bool = False
+    """Whether to only constrain from lower gammas"""
+    r_min: float = -1.0
+    """Minimum per-step reward"""
+    r_max: float = 1.0
+    """Maximum per-step reward"""
 
 @dataclass
 class ArgsAtari:
@@ -188,6 +194,12 @@ class ArgsAtari:
     """Either `l2` or `abs`, determines whether we do the analytic solution or gradient based solution."""
     gamma_spacing: str = "even"
     """Even, log, or linear."""
+    only_from_lower: bool = False
+    """Whether to only constrain from lower gammas"""
+    r_min: float = -1.0
+    """Minimum per-step reward"""
+    r_max: float = 1.0
+    """Maximum per-step reward"""
 
 
 
@@ -230,7 +242,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
 
 # ALGO LOGIC: initialize agent here:
 class ManyGammaQNetwork(nn.Module):
-    def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2"):
+    def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False, only_from_lower=False, r_min=-1.0, r_max=1.0):
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
             assert len(gammas.shape) == 1
@@ -244,18 +256,22 @@ class ManyGammaQNetwork(nn.Module):
             self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas, regularization=constraint_regularization), dtype=torch.float32)
             self._constraint_matrix = self._constraint_matrix.T # Sadly necessary until we change the get_constraint_matrix function.
         else:
-            # TODO: principled decision on whether we should zero diagonal or not. Let's go with no.
-            coefficient_module = CoefficientsModule(self._gammas, regularization=constraint_regularization, zero_diagonal=True)
-            coefficient_module.solve(num_steps=10001, lr=0.001)
-            coefficient_module.solve(num_steps=10001, lr=0.0001)
-            coefficient_module.solve(num_steps=10001, lr=0.00001)
+            # TODO: principled decision on whether we should zero diagonal or not. Let's go with zero it.
+            coefficient_module = CoefficientsModule(self._gammas, regularization=constraint_regularization, skip_self_map=True, only_from_lower=only_from_lower)
+            if not skip_coefficient_solving: # We don't care about this for target network, skipping for convenience.
+                coefficient_module.solve(num_steps=10001, lr=0.001)
+                coefficient_module.solve(num_steps=10001, lr=0.0001)
+                coefficient_module.solve(num_steps=10001, lr=0.00001)
             self._constraint_matrix = torch.tensor(coefficient_module.get_coefficients(), dtype=torch.float32)
 
-        self._upper_bounds, self._lower_bounds = get_upper_and_lower_bounds(gammas, self._constraint_matrix.T) # TODO: It's re-transposed here. Make sure thats alright.
+        self._upper_bounds, self._lower_bounds = get_upper_and_lower_bounds(gammas, self._constraint_matrix.T, r_min=r_min, r_max=r_max) # TODO: It's re-transposed here. Make sure thats alright.
+        # Upper is the most that the constraint-computed is allowed to be above the actual.
+        # Lower is how much below the actual the constraint-computed is allowed to be.
+        # Might be that way already.
+        # I should asser that the constraint loss is zero when rewards are 1 - gamma.
         self._upper_bounds = torch.tensor(self._upper_bounds, dtype=torch.float32)
         self._lower_bounds = torch.tensor(self._lower_bounds, dtype=torch.float32)
         # import ipdb; ipdb.set_trace()
-
 
         super().__init__()
         
@@ -307,10 +323,11 @@ class ManyGammaQNetwork(nn.Module):
             assert len(x.shape) == 2
             return self.network(x).view(-1, len(self._gammas), self._num_actions)
     
-    def get_best_actions_and_values(self, x):
+    def get_best_actions_and_values(self, x, output=None):
+        # Cache output if necessary
         # assert len(x.shape) == 4
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        output = self.forward(x)
+        output = self.forward(x) if output is None else output
         # assert len(output.shape) == len(x.shape) + 1
         best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
         assert best_actions.shape[0] == x.shape[0]
@@ -321,11 +338,12 @@ class ManyGammaQNetwork(nn.Module):
         assert len(best_values.shape) == 2
         return best_actions, best_values
 
-    def get_values_for_action(self, x, actions):
+    def get_values_for_action(self, x, actions, output=None):
         assert len(actions.shape) == 1
         assert actions.shape[0] == x.shape[0]
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        output = self.forward(x)
+        # output = self.forward(x)
+        output = self.forward(x) if output is None else output
         assert len(output.shape) == 3
         values = output[torch.arange(output.shape[0]), :, actions]
         assert values.shape[0] == x.shape[0]
@@ -333,7 +351,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(values.shape) == 2
         return values
 
-    def get_target_value(self, x, rewards, dones):
+    def get_target_value(self, x, rewards, dones, output=None):
         # assert len(x.shape) == 4
         assert rewards.shape[0] == x.shape[0]
         assert dones.shape[0] == x.shape[0]
@@ -342,16 +360,17 @@ class ManyGammaQNetwork(nn.Module):
         assert len(rewards.shape) == 2
         assert len(dones.shape) == 2
         
-        _, best_values = self.get_best_actions_and_values(x)
+        _, best_values = self.get_best_actions_and_values(x, output=output)
         target_values = rewards + self._gammas[None, :] * best_values * (1 - dones)
         return target_values
 
         # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
 
-    def get_constraint_computed_values_and_violations(self, x, semi_gradient=False, normalize=None):
+    def get_constraint_computed_values_and_violations(self, x, semi_gradient=False, normalize=None, output=None):
         # assert normalize in (None, 'none', 'l2', 'l1')
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        output = self.forward(x)
+        # output = self.forward(x)
+        output = self.forward(x) if output is None else output
 
         # # if normalize:
         # if normalize == 'l2':
@@ -483,9 +502,16 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     gammas = gamma_choosing_func(args.gamma_lower, args.gamma_upper, args.num_gammas)
     print(gammas)
 
-    q_network = ManyGammaQNetwork(envs, gammas, constraint_regularization=args.constraint_regularization, metric=args.coefficient_metric).to(device)
+    # So, it doesn't transfer coefficients etc.
+    q_network = ManyGammaQNetwork(
+        envs, gammas, constraint_regularization=args.constraint_regularization,
+        metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
+        r_min=args.r_min, r_max=args.r_max).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
-    target_network = ManyGammaQNetwork(envs, gammas, constraint_regularization=args.constraint_regularization, metric=args.coefficient_metric).to(device)
+    target_network = ManyGammaQNetwork(
+        envs, gammas, constraint_regularization=args.constraint_regularization,
+        metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
+        r_min=args.r_min, r_max=args.r_max).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
@@ -551,12 +577,16 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     # raise Exception("Here")
                     # td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
                 # old_val = q_network(data.observations).gather(1, data.actions).squeeze()
-                old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze())
+                # Cache it!
+                q_outputs = q_network(data.observations)
+                # old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze())
+                old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze(), output=q_outputs)
                 # raise Exception("here")
                 td_loss = F.mse_loss(td_target, old_val)
 
                 violation_dict = q_network.get_constraint_computed_values_and_violations(
-                    data.observations, semi_gradient=args.semigradient_constraint, normalize=args.constraint_normalization)
+                    data.observations, semi_gradient=args.semigradient_constraint,
+                    normalize=args.constraint_normalization, output=q_outputs)
                 upper_violations = violation_dict['upper_violations']
                 lower_violations = violation_dict['lower_violations']
                 # import ipdb; ipdb.set_trace()
@@ -564,7 +594,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
                 if args.constraint_loss_scale > 0:
-                    total_loss = td_loss + args.constraint_loss_scale * constraint_loss
+                    total_loss = td_loss + (args.constraint_loss_scale * constraint_loss)
                 else:
                     total_loss = td_loss
 
