@@ -113,6 +113,8 @@ class ArgsClassic:
     """Minimum per-step reward"""
     r_max: float = 1.0
     """Maximum per-step reward"""
+    cap_with_vmax: bool = False
+    """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
 
 @dataclass
 class ArgsAtari:
@@ -242,7 +244,10 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
 
 # ALGO LOGIC: initialize agent here:
 class ManyGammaQNetwork(nn.Module):
-    def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False, only_from_lower=False, r_min=-1.0, r_max=1.0):
+    def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False,
+                 only_from_lower=False, r_min=-1.0, r_max=1.0,
+                 cap_with_vmax=False):
+        assert r_max > r_min
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
             assert len(gammas.shape) == 1
@@ -251,6 +256,9 @@ class ManyGammaQNetwork(nn.Module):
         self._gammas = torch.tensor(gammas, dtype=torch.float32)
         self._main_gamma_index = main_gamma_index
         self._num_actions = env.single_action_space.n
+        self._r_min, self._r_max = r_min, r_max
+        self._cap_with_vmax = cap_with_vmax
+
         if metric == "l2":
             print("For now, transposing! Important change for sure")
             self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas, regularization=constraint_regularization), dtype=torch.float32)
@@ -262,6 +270,10 @@ class ManyGammaQNetwork(nn.Module):
                 coefficient_module.solve(num_steps=10001, lr=0.001)
                 coefficient_module.solve(num_steps=10001, lr=0.0001)
                 coefficient_module.solve(num_steps=10001, lr=0.00001)
+                # print("\n\ndont firget\n\n")
+                # coefficient_module.solve(num_steps=1001, lr=0.001)
+                # coefficient_module.solve(num_steps=1001, lr=0.0001)
+                # coefficient_module.solve(num_steps=1001, lr=0.00001)
             self._constraint_matrix = torch.tensor(coefficient_module.get_coefficients(), dtype=torch.float32)
 
         self._upper_bounds, self._lower_bounds = get_upper_and_lower_bounds(gammas, self._constraint_matrix.T, r_min=r_min, r_max=r_max) # TODO: It's re-transposed here. Make sure thats alright.
@@ -273,9 +285,34 @@ class ManyGammaQNetwork(nn.Module):
         self._lower_bounds = torch.tensor(self._lower_bounds, dtype=torch.float32)
         # import ipdb; ipdb.set_trace()
 
+        self._minimum_value = self._r_min / (1 - self._gammas)
+        self._maximum_value = self._r_max / (1 - self._gammas)
+
         super().__init__()
         
         self.network = self._make_network(env, len(gammas))
+
+        # # Make sure that constraints are not violated for consistent inputs
+        # test_output_big = (1 / (1 - self._gammas))[None, ...][..., None].repeat(1, 1, 3)
+        # test_output_zero = torch.zeros_like(self._gammas)[None, ...][..., None].repeat(1, 1, 3)
+        # test_output_small = -1 * test_output_big
+        # constraint_dict_big = self.get_constraint_computed_values_and_violations(test_output_big, output=test_output_big)
+        # constraint_dict_zero = self.get_constraint_computed_values_and_violations(test_output_zero, output=test_output_zero)
+        # constraint_dict_small = self.get_constraint_computed_values_and_violations(test_output_small, output=test_output_small)
+        # assert constraint_dict_big['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # assert constraint_dict_big['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # assert constraint_dict_zero['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # assert constraint_dict_zero['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # assert constraint_dict_small['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # assert constraint_dict_small['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
+
+        # test_output_violated = 2 * test_output_big
+        # constraint_dict_violated = self.get_constraint_computed_values_and_violations(test_output_violated, output=test_output_violated)
+        # assert not constraint_dict_violated['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
+        # print('all passed')
+        # import ipdb; ipdb.set_trace()
+        # print("neat")
+
 
     def to(self, *args, **kwargs):
         self = super().to(*args, **kwargs)
@@ -316,6 +353,7 @@ class ManyGammaQNetwork(nn.Module):
     def forward(self, x):
         # Now this returns all the values, reshaped so that each gamma has a vector of action-values
         # Will this always be a batch? I don't really know but let's say yeah.
+        # Size [bs, num_gammas, num_actions]
         if len(self._observation_space_shape) == 3:
             assert len(x.shape) == 4
             return self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
@@ -396,8 +434,23 @@ class ManyGammaQNetwork(nn.Module):
         #     raise Exception("Shouldn't be here")
 
         # import ipdb; ipdb.set_trace()
-        output_batch_actions_gammas = output.transpose(1, 2)
-        constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2)
+        output_batch_actions_gammas = output.transpose(1, 2) # Size [bs, num_actions, num_gammas]
+        capped_output_batch_actions_gammas = torch.maximum(
+            torch.minimum(output_batch_actions_gammas, self._maximum_value[None, None, :]),
+            self._minimum_value[None, None, :])
+        
+        cap_violations = capped_output_batch_actions_gammas - output_batch_actions_gammas # Not sure yet if I should mean or sum.
+        cap_violations = cap_violations.transpose(1, 2).detach() # should only be used for logging.
+
+        if self._cap_with_vmax:
+            constraint_computed_output = torch.matmul(capped_output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
+        else:
+            constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
+
+
+
+
+        # constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
         assert constraint_computed_output.shape[0] == x.shape[0]
         assert constraint_computed_output.shape[1] == len(self._gammas)
         assert constraint_computed_output.shape[2] == self._num_actions
@@ -411,6 +464,13 @@ class ManyGammaQNetwork(nn.Module):
         # difference = output -constraint_computed_output
         ub = self._upper_bounds[None, :, None] # Sounds like 
         lb = self._lower_bounds[None, :, None]
+
+        ## This would be a less confusing way to write that out.
+        # max_upper = constraint_computed_output + ub
+        # min_lower = constraint_computed_output - lb
+        # new_upper_violation = torch.relu(output - max_upper)
+        # new_lower_violation = torch.relu(min_lower - output)
+
         # ub = ub / normalization
         # lb = lb / normalization
         upper_violations = torch.maximum(difference - ub, torch.tensor(0, dtype=torch.float32))
@@ -422,9 +482,10 @@ class ManyGammaQNetwork(nn.Module):
         lower_violations = torch.maximum(-lb - difference, torch.tensor(0, dtype=torch.float32))
         return {
             'output': output, 
-            'constraint_computed_output': constraint_computed_output,
+            'constraint_computed_output': constraint_computed_output, # May be from capped things.
             'upper_violations': upper_violations,
             'lower_violations': lower_violations,
+            'cap_violations': cap_violations, # abs or square would give a useful statistic.
         }
 
 
@@ -506,12 +567,14 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     q_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
-        r_min=args.r_min, r_max=args.r_max).to(device)
+        r_min=args.r_min, r_max=args.r_max,
+        cap_with_vmax=args.cap_with_vmax).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
-        r_min=args.r_min, r_max=args.r_max).to(device)
+        r_min=args.r_min, r_max=args.r_max,
+        cap_with_vmax=args.cap_with_vmax).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
@@ -589,6 +652,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     normalize=args.constraint_normalization, output=q_outputs)
                 upper_violations = violation_dict['upper_violations']
                 lower_violations = violation_dict['lower_violations']
+                cap_violations_average = (violation_dict['cap_violations'] ** 2).mean()
                 # import ipdb; ipdb.set_trace()
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
@@ -613,6 +677,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['constraint_loss'].append((global_step, constraint_loss.item()))
                     log_dict['q_values'].append((global_step, old_val.mean().item()))
                     log_dict['SPS'].append((global_step, int(global_step / (time.time() - start_time))))
+                    log_dict['cap_violations_average'].append((global_step, cap_violations_average.item()))
 
                 # optimize the model
                 optimizer.zero_grad()

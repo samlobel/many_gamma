@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import numpy as np
 from gamma_utilities import *
-
+import time
 
 
 # Okay, how will we do this. We'll set up a torch optimization equation is all. Should be simple.
@@ -51,6 +51,7 @@ class CoefficientsModule(nn.Module):
         # I think that's actually tough, because when you double the number of things
         # it'll put half weights on each which means the L2 goes down. How about I just do sum
         # like before.
+        start_time = time.time()
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         gammas = self.gammas[None, ...].repeat(out_until, 1)
         powers = torch.arange(0, out_until)[..., None]
@@ -74,6 +75,8 @@ class CoefficientsModule(nn.Module):
             if i % 1000 == 0:
                 print(f"Step {i} Loss: {loss.item():.5f} Tota Diff: {difference_total.detach().item():.5f} Biggest Diff: {difference_per_gamma.max().detach().item():.5f} Coefficient Magnitude: {coefficient_magnitude.detach().item():.5f}")
 
+        end_time = time.time()
+        print(f"Time to do {num_steps} coefficient optimization steps: {end_time - start_time:.4f}")
         return {
             "total_abs_differences": total_abs_differences,
             'biggest_abs_differences': biggest_abs_differences,
