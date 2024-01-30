@@ -700,6 +700,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['last_gamma_cap_violations_average'].append((global_step, last_gamma_cap_violations_average.item()))
                     log_dict['last_gamma_constraint_loss'].append((global_step, last_gamma_constraint_loss.item()))
                     log_dict['last_gamma_q_values'].append((global_step, old_val[:, -1].mean().item()))
+                    log_dict['last_gamma_td_loss'].append((global_step, last_gamma_td_loss.item()))
 
                 # optimize the model
                 optimizer.zero_grad()
