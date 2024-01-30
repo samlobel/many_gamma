@@ -115,6 +115,8 @@ class ArgsClassic:
     """Maximum per-step reward"""
     cap_with_vmax: bool = False
     """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
+    scale_constraint_loss_by_vmax: bool = False
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
 
 @dataclass
 class ArgsAtari:
@@ -202,7 +204,10 @@ class ArgsAtari:
     """Minimum per-step reward"""
     r_max: float = 1.0
     """Maximum per-step reward"""
-
+    cap_with_vmax: bool = False
+    """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
+    scale_constraint_loss_by_vmax: bool = False
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
@@ -408,7 +413,7 @@ class ManyGammaQNetwork(nn.Module):
         # assert normalize in (None, 'none', 'l2', 'l1')
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
         # output = self.forward(x)
-        output = self.forward(x) if output is None else output
+        output = self.forward(x) if output is None else output # Size [bs, num_gammas, num_actions]
 
         # # if normalize:
         # if normalize == 'l2':
@@ -440,7 +445,7 @@ class ManyGammaQNetwork(nn.Module):
             self._minimum_value[None, None, :])
         
         cap_violations = capped_output_batch_actions_gammas - output_batch_actions_gammas # Not sure yet if I should mean or sum.
-        cap_violations = cap_violations.transpose(1, 2).detach() # should only be used for logging.
+        cap_violations = cap_violations.transpose(1, 2).detach() # should only be used for logging. # [bs, num_gammas, num_actions]
 
         if self._cap_with_vmax:
             constraint_computed_output = torch.matmul(capped_output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
@@ -643,22 +648,33 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 # Cache it!
                 q_outputs = q_network(data.observations)
                 # old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze())
-                old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze(), output=q_outputs)
+                old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze(), output=q_outputs) # [bs, num_gammas]
                 # raise Exception("here")
                 td_loss = F.mse_loss(td_target, old_val)
+                last_gamma_td_loss = F.mse_loss(td_target[:, -1], old_val[:, -1]) # was bs x n_gammas (no actions anymore)
 
                 violation_dict = q_network.get_constraint_computed_values_and_violations(
                     data.observations, semi_gradient=args.semigradient_constraint,
                     normalize=args.constraint_normalization, output=q_outputs)
-                upper_violations = violation_dict['upper_violations']
-                lower_violations = violation_dict['lower_violations']
+                upper_violations = violation_dict['upper_violations'] # actions last
+                lower_violations = violation_dict['lower_violations'] # actions last
                 cap_violations_average = (violation_dict['cap_violations'] ** 2).mean()
+                last_gamma_cap_violations_average = (violation_dict['cap_violations'][:, -1, :] ** 2).mean()
+                last_gamma_constraint_loss = 0.5*((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
                 # import ipdb; ipdb.set_trace()
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
+
+                scaled_upper_violations = upper_violations * (1 - q_network._gammas[None, :, None])
+                scaled_lower_violations = lower_violations * (1 - q_network._gammas[None, :, None])
+                scaled_constraint_loss = 0.5*((scaled_upper_violations**2).mean() + (scaled_lower_violations**2).mean())
+
                 if args.constraint_loss_scale > 0:
-                    total_loss = td_loss + (args.constraint_loss_scale * constraint_loss)
+                    if args.scale_constraint_loss_by_vmax:
+                        total_loss = td_loss + (args.constraint_loss_scale * scaled_constraint_loss)
+                    else:
+                        total_loss = td_loss + (args.constraint_loss_scale * constraint_loss)
                 else:
                     total_loss = td_loss
 
@@ -669,15 +685,21 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     writer.add_scalar("losses/total_loss", total_loss, global_step)
                     # if args.constraint_loss_scale > 0:
                     writer.add_scalar("losses/constraint_loss", constraint_loss, global_step)
+                    writer.add_scalar("losses/constraint_loss", scaled_constraint_loss, global_step)
                     writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
                     print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                     log_dict['td_loss'].append((global_step, td_loss.item()))
                     log_dict['total_loss'].append((global_step, total_loss.item()))
                     log_dict['constraint_loss'].append((global_step, constraint_loss.item()))
+                    log_dict['scaled_constraint_loss'].append((global_step, scaled_constraint_loss.item()))
                     log_dict['q_values'].append((global_step, old_val.mean().item()))
                     log_dict['SPS'].append((global_step, int(global_step / (time.time() - start_time))))
                     log_dict['cap_violations_average'].append((global_step, cap_violations_average.item()))
+
+                    log_dict['last_gamma_cap_violations_average'].append((global_step, last_gamma_cap_violations_average.item()))
+                    log_dict['last_gamma_constraint_loss'].append((global_step, last_gamma_constraint_loss.item()))
+                    log_dict['last_gamma_q_values'].append((global_step, old_val[:, -1].mean().item()))
 
                 # optimize the model
                 optimizer.zero_grad()
