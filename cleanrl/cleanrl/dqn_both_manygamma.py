@@ -26,6 +26,8 @@ from stable_baselines3.common.atari_wrappers import (
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
+import custom_envs # ZeroRewardEnv-v0, OneRewardEnv-v0
+
 
 @dataclass
 class ArgsClassic:
@@ -116,6 +118,10 @@ class ArgsClassic:
     cap_with_vmax: bool = False
     """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
     scale_constraint_loss_by_vmax: bool = False
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    additive_constant: float = 0.
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    additive_multiple_of_vmax: float = 0.
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
 
 @dataclass
@@ -208,6 +214,10 @@ class ArgsAtari:
     """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
     scale_constraint_loss_by_vmax: bool = False
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    additive_constant: float = 0.
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    additive_multiple_of_vmax: float = 0.
+    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
@@ -251,7 +261,9 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
 class ManyGammaQNetwork(nn.Module):
     def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False,
                  only_from_lower=False, r_min=-1.0, r_max=1.0,
-                 cap_with_vmax=False):
+                 cap_with_vmax=False,
+                 additive_constant=0.0,
+                 additive_multiple_of_vmax=0.0,):
         assert r_max > r_min
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
@@ -263,6 +275,9 @@ class ManyGammaQNetwork(nn.Module):
         self._num_actions = env.single_action_space.n
         self._r_min, self._r_max = r_min, r_max
         self._cap_with_vmax = cap_with_vmax
+        self._additive_constant = additive_constant
+        self._additive_multiple_of_vmax = additive_multiple_of_vmax
+
 
         if metric == "l2":
             print("For now, transposing! Important change for sure")
@@ -361,10 +376,16 @@ class ManyGammaQNetwork(nn.Module):
         # Size [bs, num_gammas, num_actions]
         if len(self._observation_space_shape) == 3:
             assert len(x.shape) == 4
-            return self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
+            output = self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
         else:
             assert len(x.shape) == 2
-            return self.network(x).view(-1, len(self._gammas), self._num_actions)
+            output = self.network(x).view(-1, len(self._gammas), self._num_actions)
+        if self._additive_constant:
+            output = output + self._additive_constant
+        if self._additive_multiple_of_vmax:
+            output = output + self._additive_multiple_of_vmax * self._maximum_value[None, :, None]
+        
+        return output
     
     def get_best_actions_and_values(self, x, output=None):
         # Cache output if necessary
@@ -573,13 +594,19 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         envs, gammas, constraint_regularization=args.constraint_regularization,
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
         r_min=args.r_min, r_max=args.r_max,
-        cap_with_vmax=args.cap_with_vmax).to(device)
+        cap_with_vmax=args.cap_with_vmax,
+        additive_constant=args.additive_constant,
+        additive_multiple_of_vmax=args.additive_multiple_of_vmax,
+        ).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
         r_min=args.r_min, r_max=args.r_max,
-        cap_with_vmax=args.cap_with_vmax).to(device)
+        cap_with_vmax=args.cap_with_vmax,
+        additive_constant=args.additive_constant,
+        additive_multiple_of_vmax=args.additive_multiple_of_vmax,
+        ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
     rb = ReplayBuffer(
