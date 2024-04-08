@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from gamma_utilities import *
 from gradient_based_coefficients import CoefficientsModule
+import tabular_environments # for gymnasium registration
 
 import gymnasium as gym
 import numpy as np
@@ -28,9 +29,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 import custom_envs # ZeroRewardEnv-v0, OneRewardEnv-v0
 
-
 @dataclass
-class ArgsClassic:
+class ArgsBase:
+    # I don't know why I didn't have a base class before, should make it clearer what changes.
+    # Started as tabular.
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
@@ -55,33 +57,33 @@ class ArgsClassic:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "CartPole-v1"
+    env_id: str = "CartPole-v1" # DIFFERS
     """the id of the environment"""
-    total_timesteps: int = 500000
+    total_timesteps: int = 500000 # DIFFERS
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 2.5e-4 # DIFFERS
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 10000
+    buffer_size: int = 10000 # DIFFERS
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
     tau: float = 1.0
     """the target network update rate"""
-    target_network_frequency: int = 500
+    target_network_frequency: int = 500 # DIFFERS
     """the timesteps it takes to update the target network"""
-    batch_size: int = 128
+    batch_size: int = 128 # DIFFERS
     """the batch size of sample from the reply memory"""
     start_e: float = 1
     """the starting epsilon for exploration"""
-    end_e: float = 0.05
+    end_e: float = 0.05 # DIFFERS
     """the ending epsilon for exploration"""
-    exploration_fraction: float = 0.5
+    exploration_fraction: float = 0.5 # DIFFERS
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 10000
+    learning_starts: int = 10000 # DIFFERS
     """timestep to start learning"""
-    train_frequency: int = 10
+    train_frequency: int = 10 # DIFFERS
     """the frequency of training"""
     constraint_loss_scale: float = 0.0
     """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
@@ -113,7 +115,7 @@ class ArgsClassic:
     """Even, log, or linear."""
     only_from_lower: bool = False
     """Whether to only constrain from lower gammas"""
-    r_min: float = -1.0
+    r_min: float = 0.0
     """Minimum per-step reward"""
     r_max: float = 1.0
     """Maximum per-step reward"""
@@ -131,31 +133,25 @@ class ArgsClassic:
     """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
 
 
+class ArgsTabular(ArgsBase):
+    env_id: str = "RandomTabularEnv-v0"
+    """the id of the environment"""
+    learning_rate: float = 1e-3
+    """the learning rate of the optimizer"""
+    target_network_frequency: int = 1
+    """the timesteps it takes to update the target network"""
+    train_frequency: int = 1
+    """the frequency of training"""
+    is_tabular: bool = True
+    """Determines stuff like logging I think"""
+
+class ArgsClassic(ArgsBase):
+    # Since just same as before.
+    pass
+
+
 @dataclass
 class ArgsAtari:
-    exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    """the name of this experiment"""
-    seed: int = 1
-    """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    track: bool = False
-    """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
-    """the wandb's project name"""
-    wandb_entity: str = None
-    """the entity (team) of wandb's project"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
-    """whether to save model into the `runs/{run_name}` folder"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
-
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
@@ -163,20 +159,12 @@ class ArgsAtari:
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
-    """the number of parallel game environments"""
     buffer_size: int = 1000000
     """the replay memory buffer size"""
-    gamma: float = 0.99
-    """the discount factor gamma"""
-    tau: float = 1.0
-    """the target network update rate"""
     target_network_frequency: int = 1000
     """the timesteps it takes to update the target network"""
     batch_size: int = 32
     """the batch size of sample from the reply memory"""
-    start_e: float = 1
-    """the starting epsilon for exploration"""
     end_e: float = 0.01
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.10
@@ -185,53 +173,6 @@ class ArgsAtari:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
-    constraint_loss_scale: float = 0.0
-    """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
-    # all_gammas: tuple[float] = (0.98, 0.99)
-    # all_gammas: str = "0.98,0.99"
-    gamma_lower: float = 0.98
-    """Smallest of the evenly-spaced Gammas"""
-    gamma_upper: float = 0.99
-    """Largest of the evenly-spaced Gammas"""
-    num_gammas: int = 2
-    """How many gammas to train"""
-    tag: str = ""
-    """Directory name for experiment"""
-    log_dir: str = "runs"
-    """One above directory name for experiment"""
-    is_atari: bool = False
-    """Determines Network Shape etc"""
-    is_tabular: bool = False
-    """Determines stuff like logging I think"""
-    semigradient_constraint: bool = False
-    """If true, detaches constraints in constraint loss"""
-    constraint_regularization: float = 0.0
-    """Nonzero values smooth out coefficients"""
-    constraint_normalization: str = None
-    """None, 'l1', or 'l2'. Whether we normalize Q values before constraint lossing."""
-    coefficient_metric: str = "l2"
-    """Either `l2` or `abs`, determines whether we do the analytic solution or gradient based solution."""
-    gamma_spacing: str = "even"
-    """Even, log, or linear."""
-    only_from_lower: bool = False
-    """Whether to only constrain from lower gammas"""
-    r_min: float = -1.0
-    """Minimum per-step reward"""
-    r_max: float = 1.0
-    """Maximum per-step reward"""
-    cap_with_vmax: bool = False
-    """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
-    scale_constraint_loss_by_vmax: bool = False
-    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
-    additive_constant: float = 0.
-    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
-    additive_multiple_of_vmax: float = 0.
-    """Whether to scale each element of constraint loss by 1/(1-gamma)"""
-    neural_net_multiplier: float = 1.0
-    """Something that gives us a simple knob to increase the output scale of the learned component."""
-    vmax_cap_method: str = "pre-coefficient" # pre-coefficient, post-coefficient, separate-regularization
-    """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
-
 
 def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
     def thunk_atari():
@@ -267,7 +208,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
         env.action_space.seed(seed)
         return env
 
-    return thunk_atari if is_atari else thunk_flat
+    return thunk_atari if is_atari else thunk_flat # Seems like flat should work with Tabular as well.
 
 
 # ALGO LOGIC: initialize agent here:
@@ -278,7 +219,8 @@ class ManyGammaQNetwork(nn.Module):
                  vmax_cap_method="pre-coefficient",
                  additive_constant=0.0,
                  additive_multiple_of_vmax=0.0,
-                 neural_net_multiplier=1.0,):
+                 neural_net_multiplier=1.0,
+                 is_tabular=False):
         assert r_max > r_min
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
@@ -325,9 +267,11 @@ class ManyGammaQNetwork(nn.Module):
         self._minimum_value = self._r_min / (1 - self._gammas)
         self._maximum_value = self._r_max / (1 - self._gammas)
 
+        self.is_tabular = is_tabular
+
         super().__init__()
         
-        self.network = self._make_network(env, len(gammas))
+        self.network = self._make_network(env, len(gammas), is_tabular=is_tabular)
 
         # # Make sure that constraints are not violated for consistent inputs
         # test_output_big = (1 / (1 - self._gammas))[None, ...][..., None].repeat(1, 1, 3)
@@ -359,9 +303,13 @@ class ManyGammaQNetwork(nn.Module):
         self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
         return self
 
-    def _make_network(self, env, num_gammas):
+    def _make_network(self, env, num_gammas, is_tabular=False):
         observation_shape = env.single_observation_space.shape
-        assert len(observation_shape) in (1, 3)
+        assert len(observation_shape) in (1, 3), observation_shape
+        if is_tabular:
+            print("TABULAR TABULAR TABULAR")
+            assert len(observation_shape) == 1 # gonna do it this way anyways
+            return nn.Linear(observation_shape[0], num_gammas * env.single_action_space.n) # Nothing fancy to see here.
         if len(observation_shape) == 1:
             print("Flat NN")
             return nn.Sequential(
@@ -566,6 +514,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 """
         )
     args = tyro.cli(ArgsClassic)
+    assert not (args.is_atari and args.is_tabular), "Shouldn't be both"
     if args.is_atari:
         args = tyro.cli(ArgsAtari) # Different defaults
     if args.is_tabular:
@@ -617,12 +566,26 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, is_atari=args.is_atari) for i in range(args.num_envs)]
     )
+    # import ipdb; ipdb.set_trace()
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     assert args.gamma_spacing in ("even", "log", "linear"), args.gamma_spacing
     gamma_choosing_func = {"even": get_even_spacing, "log": get_even_log_spacing, "linear": np.linspace}[args.gamma_spacing]
     gammas = gamma_choosing_func(args.gamma_lower, args.gamma_upper, args.num_gammas)
     print(gammas)
+
+    if args.is_tabular:
+        single_env = envs.envs[0]
+        true_q_values = single_env.get_manygamma_values(gammas, gamma_to_choose=gammas[-1])
+        # true_q_values = []
+        # for g in gammas:
+        #     # print(g)
+        #     true_q_values.append(single_env.get_optimal_q_values_and_policy(g)[0][:,None,:])
+        # # true_q_values = [env.get_optimal_q_values_and_policy(g)[0][:,None,:] for g in gammas] # Add gamma dimension to stack
+        # true_q_values = np.concatenate(true_q_values, axis=1) # [num_states, num_gammas, num_actions]
+        # import ipdb; ipdb.set_trace()
+        # print('neato')
+            
 
     # So, it doesn't transfer coefficients etc.
     q_network = ManyGammaQNetwork(
@@ -634,8 +597,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_constant=args.additive_constant,
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
+        is_tabular=args.is_tabular,
         ).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    # optimizer = optim.SGD(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
@@ -645,6 +610,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_constant=args.additive_constant,
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
+        is_tabular=args.is_tabular,
         ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
@@ -775,6 +741,26 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['last_gamma_constraint_loss'].append((global_step, last_gamma_constraint_loss.item()))
                     log_dict['last_gamma_q_values'].append((global_step, old_val[:, -1].mean().item()))
                     log_dict['last_gamma_td_loss'].append((global_step, last_gamma_td_loss.item()))
+
+                    if args.is_tabular:
+                        # I could do the pass through thing instead, maybe that's actually easier.
+                        input_states = torch.eye(envs.single_observation_space.shape[0]).to(device)
+                        learned_q_values = q_network(input_states).detach().cpu().numpy()
+                        # learned_q_values = q_network.network.weight.data.cpu().numpy().reshape(envs.single_observation_space.shape[0], len(gammas), envs.single_action_space.n)
+                        # learned_q_values = q_network.network.weight.data.cpu().numpy().reshape(envs.single_observation_space.shape[0], len(gammas), envs.single_action_space.n)
+                        assert learned_q_values.shape == true_q_values.shape, f"{learned_q_values.shape} vs {true_q_values.shape}"
+                        tabular_total_mse_from_optimal = ((learned_q_values - true_q_values)**2).mean()
+                        tabular_smallest_gamma_mse_from_optimal = (learned_q_values[:,0,:] - true_q_values[:,0,:]).mean()
+                        tabular_largest_gamma_mse_from_optimal = (learned_q_values[:,0,:] - true_q_values[:,0,:]).mean()
+                        max_learned_q = learned_q_values.max()
+                        max_q_from_buffer = old_val.max()
+                        # print(f'tabular error: {tabular_total_mse_from_optimal:.4f}  max q value: {max_learned_q:.4f} max sampled {old_val.max():.4f} actual max q: {true_q_values.max():.4f} td_loss: {td_loss:.4f}')
+                        log_dict['tabular_total_mse_from_optimal'].append((global_step, tabular_total_mse_from_optimal))
+                        log_dict['tabular_smallest_gamma_mse_from_optimal'].append((global_step, tabular_smallest_gamma_mse_from_optimal))
+                        log_dict['tabular_largest_gamma_mse_from_optimal'].append((global_step, tabular_largest_gamma_mse_from_optimal))
+                        # import ipdb; ipdb.set_trace()
+                        # print('neato')
+
 
                 # optimize the model
                 optimizer.zero_grad()
