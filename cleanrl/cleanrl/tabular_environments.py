@@ -203,8 +203,8 @@ class AllOneRewardTabularEnv(TabularEnv):
 gym.register("RandomTabularEnv-v0", entry_point=RandomTabularEnv, max_episode_steps=200)
 gym.register("SparseRewardRandomTabularEnv-v0", entry_point=SparseRewardRandomTabularEnv, max_episode_steps=200)
 gym.register("SparseRewardAbsorbingStateTabularEnv-v0", entry_point=SparseRewardAbsorbingStateTabularEnv, max_episode_steps=200)
-gym.register("NoisyRingTabularEnv-v0", entry_point=NoisyRingTabularEnv)
-gym.register("AllOneRewardTabularEnv-v0", entry_point=AllOneRewardTabularEnv)
+gym.register("NoisyRingTabularEnv-v0", entry_point=NoisyRingTabularEnv, max_episode_steps=200)
+gym.register("AllOneRewardTabularEnv-v0", entry_point=AllOneRewardTabularEnv, max_episode_steps=200)
 
 
 if __name__ == "__main__":
