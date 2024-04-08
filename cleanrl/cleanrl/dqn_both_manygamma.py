@@ -99,6 +99,8 @@ class ArgsClassic:
     """One above directory name for experiment"""
     is_atari: bool = False
     """Determines Network Shape etc"""
+    is_tabular: bool = False
+    """Determines stuff like logging I think"""
     semigradient_constraint: bool = False
     """If true, detaches constraints in constraint loss"""
     constraint_regularization: float = 0.0
@@ -123,6 +125,11 @@ class ArgsClassic:
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
     additive_multiple_of_vmax: float = 0.
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    neural_net_multiplier: float = 1.0
+    """Something that gives us a simple knob to increase the output scale of the learned component."""
+    vmax_cap_method: str = "pre-coefficient" # pre-coefficient, post-coefficient, separate-regularization
+    """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
+
 
 @dataclass
 class ArgsAtari:
@@ -194,6 +201,8 @@ class ArgsAtari:
     """One above directory name for experiment"""
     is_atari: bool = False
     """Determines Network Shape etc"""
+    is_tabular: bool = False
+    """Determines stuff like logging I think"""
     semigradient_constraint: bool = False
     """If true, detaches constraints in constraint loss"""
     constraint_regularization: float = 0.0
@@ -218,6 +227,10 @@ class ArgsAtari:
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
     additive_multiple_of_vmax: float = 0.
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
+    neural_net_multiplier: float = 1.0
+    """Something that gives us a simple knob to increase the output scale of the learned component."""
+    vmax_cap_method: str = "pre-coefficient" # pre-coefficient, post-coefficient, separate-regularization
+    """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
@@ -262,8 +275,10 @@ class ManyGammaQNetwork(nn.Module):
     def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False,
                  only_from_lower=False, r_min=-1.0, r_max=1.0,
                  cap_with_vmax=False,
+                 vmax_cap_method="pre-coefficient",
                  additive_constant=0.0,
-                 additive_multiple_of_vmax=0.0,):
+                 additive_multiple_of_vmax=0.0,
+                 neural_net_multiplier=1.0,):
         assert r_max > r_min
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
@@ -275,8 +290,10 @@ class ManyGammaQNetwork(nn.Module):
         self._num_actions = env.single_action_space.n
         self._r_min, self._r_max = r_min, r_max
         self._cap_with_vmax = cap_with_vmax
+        self._vmax_cap_method = vmax_cap_method
         self._additive_constant = additive_constant
         self._additive_multiple_of_vmax = additive_multiple_of_vmax
+        self._neural_net_multiplier = neural_net_multiplier
 
 
         if metric == "l2":
@@ -380,6 +397,7 @@ class ManyGammaQNetwork(nn.Module):
         else:
             assert len(x.shape) == 2
             output = self.network(x).view(-1, len(self._gammas), self._num_actions)
+        output = output * self._neural_net_multiplier # Either way, also to let 0 do its job. I could say != 1 but why.
         if self._additive_constant:
             output = output + self._additive_constant
         if self._additive_multiple_of_vmax:
@@ -469,7 +487,16 @@ class ManyGammaQNetwork(nn.Module):
         cap_violations = cap_violations.transpose(1, 2).detach() # should only be used for logging. # [bs, num_gammas, num_actions]
 
         if self._cap_with_vmax:
-            constraint_computed_output = torch.matmul(capped_output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
+            if self._vmax_cap_method == "pre-coefficient":
+                constraint_computed_output = torch.matmul(capped_output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
+            elif self._vmax_cap_method == "post-coefficient":
+                constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # size [bs, num_gammas, num_actions]
+                constraint_computed_output = torch.maximum(
+                    torch.minimum(constraint_computed_output, self._maximum_value[None, :, None]),
+                    self._minimum_value[None, :, None])
+            elif self._vmax_cap_method == "separate-regularization":
+                constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2)
+
         else:
             constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
 
@@ -506,6 +533,9 @@ class ManyGammaQNetwork(nn.Module):
         # If lb is 3 and diff is -4, it should be 1. -lb - diff. Nice.
         # Pretty much, the way I phrase my constraints was super confusing 
         lower_violations = torch.maximum(-lb - difference, torch.tensor(0, dtype=torch.float32))
+        # Maybe I should include different losses in here, because I would rather it take place internally than in the training loop.
+        # No, don't want to.
+
         return {
             'output': output, 
             'constraint_computed_output': constraint_computed_output, # May be from capped things.
@@ -538,8 +568,13 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     args = tyro.cli(ArgsClassic)
     if args.is_atari:
         args = tyro.cli(ArgsAtari) # Different defaults
+    if args.is_tabular:
+        args = tyro.cli(ArgsTabular) # Different defaults
 
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
+    # if not args.cap_with_vmax: # Actually I won't do this as to not mess up my onager stuff.
+    #     assert args.vmax_cap_method == "pre-coefficient", "Cause its the default" 
+    assert args.vmax_cap_method in ("pre-coefficient", "post-coefficient", "separate-regularization"), args.vmax_cap_method
     # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.tag:
@@ -595,8 +630,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
         r_min=args.r_min, r_max=args.r_max,
         cap_with_vmax=args.cap_with_vmax,
+        vmax_cap_method=args.vmax_cap_method,
         additive_constant=args.additive_constant,
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
+        neural_net_multiplier=args.neural_net_multiplier,
         ).to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
@@ -604,8 +641,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
         r_min=args.r_min, r_max=args.r_max,
         cap_with_vmax=args.cap_with_vmax,
+        vmax_cap_method=args.vmax_cap_method,
         additive_constant=args.additive_constant,
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
+        neural_net_multiplier=args.neural_net_multiplier,
         ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
@@ -685,7 +724,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     normalize=args.constraint_normalization, output=q_outputs)
                 upper_violations = violation_dict['upper_violations'] # actions last
                 lower_violations = violation_dict['lower_violations'] # actions last
-                cap_violations_average = (violation_dict['cap_violations'] ** 2).mean()
+                # cap violations is batch, gamma, actions
+                cap_violations_average = 0.5* (violation_dict['cap_violations'] ** 2).mean()
                 last_gamma_cap_violations_average = (violation_dict['cap_violations'][:, -1, :] ** 2).mean()
                 last_gamma_constraint_loss = 0.5*((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
                 # import ipdb; ipdb.set_trace()
@@ -695,13 +735,19 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
                 scaled_upper_violations = upper_violations * (1 - q_network._gammas[None, :, None])
                 scaled_lower_violations = lower_violations * (1 - q_network._gammas[None, :, None])
+                scaled_cap_violations_average = 0.5*((violation_dict['cap_violations'] * (1 - q_network._gammas[None, :, None]))** 2).mean()
                 scaled_constraint_loss = 0.5*((scaled_upper_violations**2).mean() + (scaled_lower_violations**2).mean())
+                # scaled_cap_violaion_average =
 
                 if args.constraint_loss_scale > 0:
                     if args.scale_constraint_loss_by_vmax:
                         total_loss = td_loss + (args.constraint_loss_scale * scaled_constraint_loss)
+                        if args.cap_with_vmax and args.vmax_cap_method == "separate-regularization": # Don't love how messy this is.
+                            total_loss += args.constraint_loss_scale * scaled_cap_violations_average
                     else:
                         total_loss = td_loss + (args.constraint_loss_scale * constraint_loss)
+                        if args.cap_with_vmax and args.vmax_cap_method == "separate-regularization":
+                            total_loss += args.constraint_loss_scale * cap_violations_average
                 else:
                     total_loss = td_loss
 
@@ -723,6 +769,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['q_values'].append((global_step, old_val.mean().item()))
                     log_dict['SPS'].append((global_step, int(global_step / (time.time() - start_time))))
                     log_dict['cap_violations_average'].append((global_step, cap_violations_average.item()))
+                    log_dict['scaled_cap_violations_average'].append((global_step, scaled_cap_violations_average.item()))
 
                     log_dict['last_gamma_cap_violations_average'].append((global_step, last_gamma_cap_violations_average.item()))
                     log_dict['last_gamma_constraint_loss'].append((global_step, last_gamma_constraint_loss.item()))
