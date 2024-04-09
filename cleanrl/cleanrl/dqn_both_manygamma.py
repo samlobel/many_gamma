@@ -121,6 +121,8 @@ class ArgsBase:
     """Maximum per-step reward"""
     cap_with_vmax: bool = False
     """Whether to cap values with 1/(1-gamma) before inputting to constraint matrix, also keeps constraints below the same."""
+    pairwise_constraint: bool = False
+    """Make a constrain using the log exp math from the writeup"""
     scale_constraint_loss_by_vmax: bool = False
     """Whether to scale each element of constraint loss by 1/(1-gamma)"""
     additive_constant: float = 0.
@@ -131,6 +133,8 @@ class ArgsBase:
     """Something that gives us a simple knob to increase the output scale of the learned component."""
     vmax_cap_method: str = "pre-coefficient" # pre-coefficient, post-coefficient, separate-regularization
     """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
+    optimizer: str = "adam"
+    """Which optimizer to use. Choices are adam and sgd"""
 
 
 class ArgsTabular(ArgsBase):
@@ -599,7 +603,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
         ).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    assert args.optimizer.lower() in ("adam", "sgd"), args.optimizer
+    if args.optimizer.lower() == "adam":
+        optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    else:
+        optimizer = optim.SGD(q_network.parameters(), lr=args.learning_rate)
     # optimizer = optim.SGD(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
