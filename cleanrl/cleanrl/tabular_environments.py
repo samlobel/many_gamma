@@ -24,7 +24,7 @@ def q_value_iteration(env, gamma=0.99, theta=1e-8):
     num_states = obs_space_shape[0]
     Q_shape = (num_states, int(env.action_space.n))
     # print(Q_shape)
-    # import ipdb; ipdb.set_trace()
+    # 
     Q = np.zeros(Q_shape)
     # Q = np.zeros((env.observation_space.shape, env.action_space.shape))
     iter_num = 0
@@ -96,7 +96,6 @@ class TabularEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
         self.state = np.random.choice(self.num_states, p=self.initial_distribution)
-        # state_array = 
         return self._one_hot(self.state), {'state_integer': self.state}
 
     def _one_hot(self, state):
@@ -110,7 +109,7 @@ class TabularEnv(gym.Env):
         terminated = False
         truncated = False # Assume timelimit wrapper overwrites this
         self.state = next_state
-        return self._one_hot(next_state), reward, terminated, truncated, {}
+        return self._one_hot(next_state), reward, terminated, truncated, {'state_integer': self.state}
     
     def get_optimal_q_values_and_policy(self, gamma=0.99):
         return q_value_iteration(self, gamma=gamma)
@@ -182,7 +181,6 @@ class NoisyRingTabularEnv(TabularEnv):
             # print(i, 1, (num_states + i - 1 ) % num_states)
             transition_tensor[i, 0, (num_states + i + 1 ) % num_states] = (1 - amount_noise_prob) 
             transition_tensor[i, 1, (num_states + i - 1 ) % num_states] = (1 - amount_noise_prob) 
-        print(transition_tensor)
 
         # transition_tensor = sample_transition_function(num_states, num_actions)
         # transition_tensor[0] = 0
@@ -199,6 +197,12 @@ class AllOneRewardTabularEnv(TabularEnv):
         initial_distribution = sample_random_simplex_vector(num_states)
         super().__init__(num_states, num_actions, transition_tensor, reward_matrix, initial_distribution)
 
+class AllZeroRewardTabularEnv(TabularEnv):
+    def __init__(self, num_states=10, num_actions=2, amount_noise_prob=0.1):
+        transition_tensor = sample_transition_function(num_states, num_actions)
+        reward_matrix = np.zeros((num_states, num_actions), dtype=np.float32)
+        initial_distribution = sample_random_simplex_vector(num_states)
+        super().__init__(num_states, num_actions, transition_tensor, reward_matrix, initial_distribution)
 
 gym.register("RandomTabularEnv-v0", entry_point=RandomTabularEnv, max_episode_steps=200)
 gym.register("SparseRewardRandomTabularEnv-v0", entry_point=SparseRewardRandomTabularEnv, max_episode_steps=200)

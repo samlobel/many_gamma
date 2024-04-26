@@ -5,7 +5,6 @@ import gzip
 import matplotlib.pyplot as plt
 # from dopamine.colab import utils as colab_utils
 import numpy as np
-import pandas as pd
 
 try:
     import seaborn as sns; sns.set()
@@ -13,28 +12,26 @@ except ImportError:
     print("Could not import seaborn. Plotting will not be as pretty.")
 
 
-def get_summary_data(csv_path, xkey='actor_steps', ykey='episode_return'):
+def get_summary_data(pkl_path, field_to_plot='episodic_return'):
     # Returns XY of summary data. We need some fancy averaging process now, as opposed to before
     # because they may have different x axes.
-    df = pd.read_csv(csv_path)
+    with open(pkl_path, "rb") as f:
+        data = pickle.load(f)
     try:
         # steps = df['actor_steps']
-        x_axis = df[xkey]
-    except:
-        print('failed for id', csv_path)
+        values = data[field_to_plot]
+        x_values, y_values = zip(*values)
+    except Exception as e:
+        print('failed for id', pkl_path)
+        print('field_to_plot', field_to_plot)
+        print(e)
         return
-    if xkey == 'actor_steps':
-        x_axis = 4 * x_axis
-    # returns = df['episode_return']
-    y_axis = df[ykey]
+    # 
+    return x_values, y_values
 
-    # import ipdb; ipdb.set_trace()
-    return x_axis, y_axis
-
-def plot_statistic(csv_path, save_path=None, show=True, legend_name=None):
-    # 'train_episode_lengths', 'train_episode_returns', 'train_average_return', 'train_average_steps_per_second', 'eval_episode_lengths', 'eval_episode_returns', 'eval_average_return'
+def plot_statistic(pkl_path, save_path=None, show=True, legend_name=None):
     
-    frames, returns = get_summary_data(csv_path)
+    frames, returns = get_summary_data(pkl_path)
     plt.plot(frames, returns, label=legend_name)
     plt.plot()
     plt.title("Episode Return")
@@ -139,7 +136,7 @@ def plot_true_vs_approx_bonus(count_dict, save_path=None, show=True, legend_name
     if normalize is not None:
         min_approx, max_approx = min(approx_bonus), max(approx_bonus)
         approx_bonus = [(ab - min_approx) / (max_approx - min_approx) for ab in approx_bonus]
-    # import ipdb; ipdb.set_trace()
+    # 
     max_bonus = max(exact_bonus + approx_bonus)
     r_corr = _get_r(exact_bonus, approx_bonus)
     if r_corr < min_r:
@@ -360,44 +357,22 @@ def plot_all_count_dicts(experiment_directory, iter=-1, filter_func=None, kwarg_
 def plot_all_spatial_bonuses(experiment_directory, iter=-1, filter_func=None, kwarg_dict=dict()):
     do_thing_to_all(experiment_directory, plot_spatial_bonus, iter, filter_func, kwarg_dict=kwarg_dict)
 
+def moving_average(a, n=25):
+    ret = np.cumsum(a, dtype=float)
+    ret[n:] = ret[n:] - ret[:-n]
+    return ret[n-1:] / n
 
+
+def single_plot(run_directory, field_to_plot, smoothen=10):
+    pkl_path = os.path.join(run_directory, 'log_dict.pkl')
+    frames, field_values = get_summary_data(pkl_path, field_to_plot)
+    if smoothen:
+        field_values = moving_average(field_values, n=smoothen)
+    pass
 
 
 if __name__ == "__main__":
-    experiment_name = "/home/sam/second_drive/logs/exploration/bonus_based_exploration/remote_dopamine_logs/dopamine_logs/monte/rainbow_coinflip/full_runs/200m/bigmem_higher_qlr_1"
-    # experiment_name = "/home/sam/second_drive/logs/exploration/bonus_based_exploration/remote_dopamine_logs/dopamine_logs/monte/rainbow_rnd/full_runs/200m/origin_config_for_seeds"
-    print_rooms_for_runs(experiment_name, episode=-1)
-    exit()
-    # agent_name = "noisy_rainbow"
-    # experiment_name = "6x6_noisy"
-    # statistic = "train_episode_lengths"
-
-    # rootdir = os.path.expanduser("~/git-repos/bonus_based_exploration/dopamine_logs/gridworld")
-    # logdir = os.path.join(rootdir, f"{agent_name}/{experiment_name}/logs/")
-    # savepath = os.path.join(rootdir, f"{agent_name}/{experiment_name}/plots/{statistic}.png")
-    # plot_statistic(logdir, statistic, save_path=savepath)
-
-    # log_dir = "dopamine_logs/gridworld/testing_counts/21/coinflip_1/logs"
-    # plot_statistic(log_dir, "train_episode_lengths")
-
-    count_dict_path = "dopamine_logs/gridworld/testing/purely_intrinsic/counts/count_dict.pkl"
-
-    count_dict = load_count_dict(count_dict_path)
-    biggest_key = max(list(count_dict.keys()))
-    print("biggest_key", biggest_key)
-    print(list(count_dict.keys()))
-    
-    vf_save_path = f"dopamine_logs/gridworld/testing/purely_intrinsic/counts/vf_episode_{biggest_key}.png"
-    count_save_path = f"dopamine_logs/gridworld/testing/purely_intrinsic/counts/counts_episode_{biggest_key}.png"
-    bonus_save_path = f"dopamine_logs/gridworld/testing/purely_intrinsic/counts/bonus_episode_{biggest_key}.png"
-    mse_count_save_path = f"dopamine_logs/gridworld/testing/purely_intrinsic/counts/count_rmse.png"
-    mse_bonus_save_path = f"dopamine_logs/gridworld/testing/purely_intrinsic/counts/bonus_rmse.png"
-    exploration_amount_path = "dopamine_logs/gridworld/testing/purely_intrinsic/counts/exploration_amount.png"
-    lc_comparison_save_path = "dopamine_logs/gridworld/21/rainbow_coinflip/reward_scale_sweep/lc_comparison.png"
-    
-    # plot_value_function_gridworld(count_dict[biggest_key], save_path=vf_save_path)
-    # plot_true_vs_approx_counts(count_dict[biggest_key], save_path=count_save_path)
-    # plot_true_vs_approx_bonus(count_dict[biggest_key], save_path=bonus_save_path)
-    # plot_mse_vs_iteration(count_dict, mode="count", save_path=mse_count_save_path)
-    # plot_mse_vs_iteration(count_dict, mode="bonus", save_path=mse_bonus_save_path)
-    plot_exploration_amounts(count_dict, save_path=exploration_amount_path, show=False, legend_name='RainbowCoinFlip')
+    """Set up so that we can do a single run plot"""
+    experiment_name = "/Users/slobal1/Code/ML/many_gamma/many_gamma/cleanrl/testing_runs/tabular/pairwise_ring_2/"
+    run_title = "tabular_ring_pairwise_fixed_higher_lr_longer_16__envid_NoisyRingTabularEnv-v0__constraintregularization_0.1__constraintlossscale_0.1__pairwiselossscale_0.1__seed_2__learningrate_3e-3__vmaxcapmethod_separate-regularization__additivemultipleofvmax_2.0"
+    run_directory = os.path.join(experiment_name, run_title)

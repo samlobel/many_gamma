@@ -271,7 +271,7 @@ class ManyGammaQNetwork(nn.Module):
 
     def get_constraint_computed_values_and_violations(self, x):
         output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        # import ipdb; ipdb.set_trace()
+        # 
         constraint_computed_output = torch.matmul(output.transpose(1, 2), self._constraint_matrix).transpose(1, 2)
         assert constraint_computed_output.shape[0] == x.shape[0]
         assert constraint_computed_output.shape[1] == len(self._gammas)
@@ -373,7 +373,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     target_network = ManyGammaQNetwork(envs, gammas).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
-    # import ipdb; ipdb.set_trace()
+    # 
 
     rb = ReplayBuffer(
         args.buffer_size,
@@ -444,7 +444,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 violation_dict = q_network.get_constraint_computed_values_and_violations(data.observations)
                 upper_violations = violation_dict['upper_violations']
                 lower_violations = violation_dict['lower_violations']
-                # import ipdb; ipdb.set_trace()
+                # 
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())

@@ -14,35 +14,29 @@ import os
     
 #     return truncated_scores
 
-# def gather_evaluator_csv_files_from_base_dir(base_dir=None, selected_acme_ids=None):
-def gather_csv_files_from_base_dir(base_dir=None, selected_acme_ids=None, log_type='evaluator'):
+def gather_pkl_files_from_base_dir(base_dir, selected_run_names=None):
     """
-    Here the base_dir is assumed to be ~/acme, and under the base_dir are the dirs
-    named with `acme_id`, under which has `logs/evaluator/logs.csv`.
+    base dir has directories with log files inside of them
 
     Args:
         base_dir (_type_): acme results dir, if None use the default acme setting
-        selected_acme_ids (_type_): if None, use all acme_ids, otherwise use the selected ones
+        selected_run_names (_type_): if None, use all run_names, otherwise use the selected ones
         
     Returns:
-        a dict of {acme_id: csv_path}
+        a dict of {run_name: pkl_path}
     """
-    if base_dir is None:
-        base_dir = os.path.expanduser('~/acme')
-
-    # find all subdir and get the acme_id of all
-    id_to_csv = {}
-    for acme_id in os.listdir(base_dir):
-        if selected_acme_ids is not None and acme_id not in selected_acme_ids:
+    # find all subdir and get the run_name of all
+    id_to_pkl = {}
+    for run_name in os.listdir(base_dir):
+        if selected_run_names is not None and run_name not in selected_run_names:
             continue
-        exp_dir = os.path.join(base_dir, acme_id)
+        exp_dir = os.path.join(base_dir, run_name)
         if not os.path.isdir(exp_dir):
             continue
-        # csv_path = os.path.join(exp_dir, 'logs', 'evaluator', 'logs.csv')
-        csv_path = os.path.join(exp_dir, 'logs', log_type, 'logs.csv')
-        id_to_csv[acme_id] = csv_path
+        pkl_path = os.path.join(exp_dir, 'log_dict.pkl')
+        id_to_pkl[run_name] = pkl_path
 
-    return id_to_csv
+    return id_to_pkl
 
 def interpolate_xys(scores):
     all_xs = [frames for (frames, returns) in scores]
@@ -71,8 +65,6 @@ def truncate_and_interpolate(scores, max_frames=-1, min_frames=-1):
     
     xs, all_ys = interpolate_xys(shortened_scores)
     return xs, all_ys
-
-
 
 
 def get_plot_params(array):
@@ -109,13 +101,14 @@ def smoothen_data(scores, n=10):
 #         for i, score in enumerate(score_array):
 #             plt.plot(score, linewidth=linewidth, label=label+f"_{i+1}", alpha=0.6)
 
-def generate_plot(xs, all_ys, label, smoothen=0, linewidth=2, all_seeds=False):
+def generate_plot(xs, all_ys, label, smoothen=0, linewidth=2, all_seeds=False, log_scale=False):
     # smoothen is a number of iterations to average over. Much less meaningful now that we have weird x axis.
     if smoothen > 0:
         xs = moving_average(xs, n=smoothen)
         all_ys = smoothen_data(all_ys, n=smoothen)
 
     median, mean, top, bottom = get_plot_params(all_ys)
+    # 
     plt.plot(xs, mean, linewidth=linewidth, label=label, alpha=0.9)
     # plt.fill_between( range(len(top)), top, bottom, alpha=0.2 )
     plt.fill_between( xs, top, bottom, alpha=0.2 )

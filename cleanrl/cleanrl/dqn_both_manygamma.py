@@ -9,6 +9,7 @@ from collections import defaultdict
 from gamma_utilities import *
 from gradient_based_coefficients import CoefficientsModule
 import tabular_environments # for gymnasium registration
+from q_networks import ManyGammaQNetwork, get_upper_and_lower_bound_pairwise_constraints
 
 import gymnasium as gym
 import numpy as np
@@ -87,6 +88,8 @@ class ArgsBase:
     """the frequency of training"""
     constraint_loss_scale: float = 0.0
     """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
+    pairwise_loss_scale: float = 0.0
+    """the scale of the constraint loss. Set to 0 (default) to disable constraint loss"""
     # all_gammas: tuple[float] = (0.98, 0.99)
     # all_gammas: str = "0.98,0.99"
     gamma_lower: float = 0.98
@@ -135,6 +138,10 @@ class ArgsBase:
     """How to cap the Q-values. pre-coefficient, post-coefficient, separate-regularization"""
     optimizer: str = "adam"
     """Which optimizer to use. Choices are adam and sgd"""
+    td_loss_scale: float = 1.0
+    """How much to weight TD loss by. Set to 0 for only constraint optimization."""
+    initialize_to_optimal: bool = False
+    """Whether to initialize the Q-values to the optimal values (if tabular)."""
 
 
 class ArgsTabular(ArgsBase):
@@ -216,289 +223,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
 
 
 # ALGO LOGIC: initialize agent here:
-class ManyGammaQNetwork(nn.Module):
-    def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False,
-                 only_from_lower=False, r_min=-1.0, r_max=1.0,
-                 cap_with_vmax=False,
-                 vmax_cap_method="pre-coefficient",
-                 additive_constant=0.0,
-                 additive_multiple_of_vmax=0.0,
-                 neural_net_multiplier=1.0,
-                 is_tabular=False):
-        assert r_max > r_min
-        assert len(gammas) >= 1
-        if not isinstance(gammas, (list, tuple)):
-            assert len(gammas.shape) == 1
-        assert metric in ("l2", "abs"), metric # Whether to use gradient based solver.
-        self._observation_space_shape = env.single_observation_space.shape
-        self._gammas = torch.tensor(gammas, dtype=torch.float32)
-        self._main_gamma_index = main_gamma_index
-        self._num_actions = env.single_action_space.n
-        self._r_min, self._r_max = r_min, r_max
-        self._cap_with_vmax = cap_with_vmax
-        self._vmax_cap_method = vmax_cap_method
-        self._additive_constant = additive_constant
-        self._additive_multiple_of_vmax = additive_multiple_of_vmax
-        self._neural_net_multiplier = neural_net_multiplier
 
-
-        if metric == "l2":
-            print("For now, transposing! Important change for sure")
-            self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas, regularization=constraint_regularization), dtype=torch.float32)
-            self._constraint_matrix = self._constraint_matrix.T # Sadly necessary until we change the get_constraint_matrix function.
-        else:
-            # TODO: principled decision on whether we should zero diagonal or not. Let's go with zero it.
-            coefficient_module = CoefficientsModule(self._gammas, regularization=constraint_regularization, skip_self_map=True, only_from_lower=only_from_lower)
-            if not skip_coefficient_solving: # We don't care about this for target network, skipping for convenience.
-                coefficient_module.solve(num_steps=10001, lr=0.001)
-                coefficient_module.solve(num_steps=10001, lr=0.0001)
-                coefficient_module.solve(num_steps=10001, lr=0.00001)
-                # print("\n\ndont firget\n\n")
-                # coefficient_module.solve(num_steps=1001, lr=0.001)
-                # coefficient_module.solve(num_steps=1001, lr=0.0001)
-                # coefficient_module.solve(num_steps=1001, lr=0.00001)
-            self._constraint_matrix = torch.tensor(coefficient_module.get_coefficients(), dtype=torch.float32)
-
-        self._upper_bounds, self._lower_bounds = get_upper_and_lower_bounds(gammas, self._constraint_matrix.T, r_min=r_min, r_max=r_max) # TODO: It's re-transposed here. Make sure thats alright.
-        # Upper is the most that the constraint-computed is allowed to be above the actual.
-        # Lower is how much below the actual the constraint-computed is allowed to be.
-        # Might be that way already.
-        # I should asser that the constraint loss is zero when rewards are 1 - gamma.
-        self._upper_bounds = torch.tensor(self._upper_bounds, dtype=torch.float32)
-        self._lower_bounds = torch.tensor(self._lower_bounds, dtype=torch.float32)
-        # import ipdb; ipdb.set_trace()
-
-        self._minimum_value = self._r_min / (1 - self._gammas)
-        self._maximum_value = self._r_max / (1 - self._gammas)
-
-        self.is_tabular = is_tabular
-
-        super().__init__()
-        
-        self.network = self._make_network(env, len(gammas), is_tabular=is_tabular)
-
-        # # Make sure that constraints are not violated for consistent inputs
-        # test_output_big = (1 / (1 - self._gammas))[None, ...][..., None].repeat(1, 1, 3)
-        # test_output_zero = torch.zeros_like(self._gammas)[None, ...][..., None].repeat(1, 1, 3)
-        # test_output_small = -1 * test_output_big
-        # constraint_dict_big = self.get_constraint_computed_values_and_violations(test_output_big, output=test_output_big)
-        # constraint_dict_zero = self.get_constraint_computed_values_and_violations(test_output_zero, output=test_output_zero)
-        # constraint_dict_small = self.get_constraint_computed_values_and_violations(test_output_small, output=test_output_small)
-        # assert constraint_dict_big['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # assert constraint_dict_big['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # assert constraint_dict_zero['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # assert constraint_dict_zero['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # assert constraint_dict_small['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # assert constraint_dict_small['upper_violations'].allclose(torch.tensor(0.), atol=1e-5)
-
-        # test_output_violated = 2 * test_output_big
-        # constraint_dict_violated = self.get_constraint_computed_values_and_violations(test_output_violated, output=test_output_violated)
-        # assert not constraint_dict_violated['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
-        # print('all passed')
-        # import ipdb; ipdb.set_trace()
-        # print("neat")
-
-
-    def to(self, *args, **kwargs):
-        self = super().to(*args, **kwargs)
-        self._gammas = self._gammas.to(*args, **kwargs)
-        self._constraint_matrix = self._constraint_matrix.to(*args, **kwargs)
-        self._upper_bounds = self._upper_bounds.to(*args, **kwargs)
-        self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
-        return self
-
-    def _make_network(self, env, num_gammas, is_tabular=False):
-        observation_shape = env.single_observation_space.shape
-        assert len(observation_shape) in (1, 3), observation_shape
-        if is_tabular:
-            print("TABULAR TABULAR TABULAR")
-            assert len(observation_shape) == 1 # gonna do it this way anyways
-            return nn.Linear(observation_shape[0], num_gammas * env.single_action_space.n) # Nothing fancy to see here.
-        if len(observation_shape) == 1:
-            print("Flat NN")
-            return nn.Sequential(
-                nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
-                nn.ReLU(),
-                nn.Linear(120, 84),
-                nn.ReLU(),
-                nn.Linear(84, num_gammas * env.single_action_space.n),
-            )
-        else:
-            print("Conv NN")
-            return nn.Sequential(
-                nn.Conv2d(4, 32, 8, stride=4),
-                nn.ReLU(),
-                nn.Conv2d(32, 64, 4, stride=2),
-                nn.ReLU(),
-                nn.Conv2d(64, 64, 3, stride=1),
-                nn.ReLU(),
-                nn.Flatten(),
-                nn.Linear(3136, 512),
-                nn.ReLU(),
-                # nn.Linear(512, env.single_action_space.n),
-                nn.Linear(512, num_gammas * env.single_action_space.n),
-            )
-
-    def forward(self, x):
-        # Now this returns all the values, reshaped so that each gamma has a vector of action-values
-        # Will this always be a batch? I don't really know but let's say yeah.
-        # Size [bs, num_gammas, num_actions]
-        if len(self._observation_space_shape) == 3:
-            assert len(x.shape) == 4
-            output = self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
-        else:
-            assert len(x.shape) == 2
-            output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        output = output * self._neural_net_multiplier # Either way, also to let 0 do its job. I could say != 1 but why.
-        if self._additive_constant:
-            output = output + self._additive_constant
-        if self._additive_multiple_of_vmax:
-            output = output + self._additive_multiple_of_vmax * self._maximum_value[None, :, None]
-        
-        return output
-    
-    def get_best_actions_and_values(self, x, output=None):
-        # Cache output if necessary
-        # assert len(x.shape) == 4
-        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        output = self.forward(x) if output is None else output
-        # assert len(output.shape) == len(x.shape) + 1
-        best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
-        assert best_actions.shape[0] == x.shape[0]
-        assert len(best_actions.shape) == 1
-        best_values = output[torch.arange(output.shape[0]), :, best_actions]
-        assert best_values.shape[0] == x.shape[0]
-        assert best_values.shape[1] == len(self._gammas)
-        assert len(best_values.shape) == 2
-        return best_actions, best_values
-
-    def get_values_for_action(self, x, actions, output=None):
-        assert len(actions.shape) == 1
-        assert actions.shape[0] == x.shape[0]
-        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        # output = self.forward(x)
-        output = self.forward(x) if output is None else output
-        assert len(output.shape) == 3
-        values = output[torch.arange(output.shape[0]), :, actions]
-        assert values.shape[0] == x.shape[0]
-        assert values.shape[1] == len(self._gammas)
-        assert len(values.shape) == 2
-        return values
-
-    def get_target_value(self, x, rewards, dones, output=None):
-        # assert len(x.shape) == 4
-        assert rewards.shape[0] == x.shape[0]
-        assert dones.shape[0] == x.shape[0]
-        assert rewards.shape[1] == 1
-        assert dones.shape[1] == 1
-        assert len(rewards.shape) == 2
-        assert len(dones.shape) == 2
-        
-        _, best_values = self.get_best_actions_and_values(x, output=output)
-        target_values = rewards + self._gammas[None, :] * best_values * (1 - dones)
-        return target_values
-
-        # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
-
-    def get_constraint_computed_values_and_violations(self, x, semi_gradient=False, normalize=None, output=None):
-        # assert normalize in (None, 'none', 'l2', 'l1')
-        # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
-        # output = self.forward(x)
-        output = self.forward(x) if output is None else output # Size [bs, num_gammas, num_actions]
-
-        # # if normalize:
-        # if normalize == 'l2':
-        #     normalization = output.norm(dim=2, keepdim=True)
-        # elif normalize == 'l1':
-        #     normalization = output.norm(dim=2, keepdim=True, p=1)
-        # elif normalize == 'none' or normalize is None:
-        #     normalization = 1
-        # else:
-        #     print(normalize)
-        #     raise Exception("Shouldn't be here")
-
-        # output = output / normalization
-        
-        # if normalize == 'l2':
-        #     output = output / output.norm(dim=2, keepdim=True)
-        # elif normalize == 'l1':
-        #     output = output / output.norm(dim=2, keepdim=True, p=1)
-        # elif normalize == 'none' or normalize is None:
-        #     pass
-        # else:
-        #     print(normalize)
-        #     raise Exception("Shouldn't be here")
-
-        # import ipdb; ipdb.set_trace()
-        output_batch_actions_gammas = output.transpose(1, 2) # Size [bs, num_actions, num_gammas]
-        capped_output_batch_actions_gammas = torch.maximum(
-            torch.minimum(output_batch_actions_gammas, self._maximum_value[None, None, :]),
-            self._minimum_value[None, None, :])
-        
-        cap_violations = capped_output_batch_actions_gammas - output_batch_actions_gammas # Not sure yet if I should mean or sum.
-        cap_violations = cap_violations.transpose(1, 2).detach() # should only be used for logging. # [bs, num_gammas, num_actions]
-
-        if self._cap_with_vmax:
-            if self._vmax_cap_method == "pre-coefficient":
-                constraint_computed_output = torch.matmul(capped_output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
-            elif self._vmax_cap_method == "post-coefficient":
-                constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # size [bs, num_gammas, num_actions]
-                constraint_computed_output = torch.maximum(
-                    torch.minimum(constraint_computed_output, self._maximum_value[None, :, None]),
-                    self._minimum_value[None, :, None])
-            elif self._vmax_cap_method == "separate-regularization":
-                constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2)
-
-        else:
-            constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
-
-
-
-
-        # constraint_computed_output = torch.matmul(output_batch_actions_gammas, self._constraint_matrix).transpose(1, 2) # Size [bs, num_gammas, num_actions]
-        assert constraint_computed_output.shape[0] == x.shape[0]
-        assert constraint_computed_output.shape[1] == len(self._gammas)
-        assert constraint_computed_output.shape[2] == self._num_actions
-
-        if semi_gradient:
-            # In this case we only want to send the outputs towards the constraints.
-            # I think this makes more sense.
-            constraint_computed_output = constraint_computed_output.detach()
-
-        difference = constraint_computed_output - output
-        # difference = output -constraint_computed_output
-        ub = self._upper_bounds[None, :, None] # Sounds like 
-        lb = self._lower_bounds[None, :, None]
-
-        ## This would be a less confusing way to write that out.
-        # max_upper = constraint_computed_output + ub
-        # min_lower = constraint_computed_output - lb
-        # new_upper_violation = torch.relu(output - max_upper)
-        # new_lower_violation = torch.relu(min_lower - output)
-
-        # ub = ub / normalization
-        # lb = lb / normalization
-        upper_violations = torch.maximum(difference - ub, torch.tensor(0, dtype=torch.float32))
-        # lower_violations = torch.maximum(lb - difference, torch.tensor(0, dtype=torch.float32))
-        # if lb is 3 and diff is positive, it should be 0.
-        # If lb is 3 and diff is -2, it should still be 0
-        # If lb is 3 and diff is -4, it should be 1. -lb - diff. Nice.
-        # Pretty much, the way I phrase my constraints was super confusing 
-        lower_violations = torch.maximum(-lb - difference, torch.tensor(0, dtype=torch.float32))
-        # Maybe I should include different losses in here, because I would rather it take place internally than in the training loop.
-        # No, don't want to.
-
-        return {
-            'output': output, 
-            'constraint_computed_output': constraint_computed_output, # May be from capped things.
-            'upper_violations': upper_violations,
-            'lower_violations': lower_violations,
-            'cap_violations': cap_violations, # abs or square would give a useful statistic.
-        }
-
-
-
-    # def get_score_estimates(self, x, actions):
 
 
 
@@ -536,6 +261,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
         # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.tag + '__' if args.tag else ''}{int(time.time())}"
 
+    if args.initialize_to_optimal:
+        assert args.is_tabular, "Can only initialize to optimal if tabular"
+
     if args.track:
         import wandb
 
@@ -570,7 +298,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, is_atari=args.is_atari) for i in range(args.num_envs)]
     )
-    # import ipdb; ipdb.set_trace()
+
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     assert args.gamma_spacing in ("even", "log", "linear"), args.gamma_spacing
@@ -587,7 +315,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         #     true_q_values.append(single_env.get_optimal_q_values_and_policy(g)[0][:,None,:])
         # # true_q_values = [env.get_optimal_q_values_and_policy(g)[0][:,None,:] for g in gammas] # Add gamma dimension to stack
         # true_q_values = np.concatenate(true_q_values, axis=1) # [num_states, num_gammas, num_actions]
-        # import ipdb; ipdb.set_trace()
         # print('neato')
             
 
@@ -602,6 +329,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
+        initialize_to_optimal=args.initialize_to_optimal,
+        optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
     assert args.optimizer.lower() in ("adam", "sgd"), args.optimizer
     if args.optimizer.lower() == "adam":
@@ -619,15 +348,21 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
+        initialize_to_optimal=args.initialize_to_optimal,
+        optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
     target_network.load_state_dict(q_network.state_dict())
+
+
+    # 
 
     rb = ReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
         device,
-        optimize_memory_usage=True,
+        # optimize_memory_usage=True,
+        optimize_memory_usage=False, # When true it doesn't handle termination correctly.
         handle_timeout_termination=False,
     )
     start_time = time.time()
@@ -665,17 +400,42 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         for idx, trunc in enumerate(truncations):
             if trunc:
                 real_next_obs[idx] = infos["final_observation"][idx]
-        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+        # 
+        # if args.is_tabular:
+        #     max_obs_index = np.argmax(obs[0])
+        #     max_next_obs_index = np.argmax(real_next_obs[0])
+        #     assert np.absolute((max_obs_index - max_next_obs_index)%10) == 1 or np.absolute((max_next_obs_index - max_obs_index)%10) == 1, f"{max_obs_index} to {max_next_obs_index}"
+
+        rb.add(obs.copy(), real_next_obs.copy(), actions.copy(), rewards.copy(), terminations.copy(), infos.copy())
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
 
         # ALGO LOGIC: training.
-        # TODO: Have methods take in the result of forward, so I don't have to recompute, should save me ~25% compute.
         # TODO: add DDQN feature, in case helpful.
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
+                # 
+                # if args.is_tabular:
+                #     assert data.dones.max() == data.dones.min() == 0.
+                #     assert data.observations.sum(dim=1).min() == data.observations.sum(dim=1).max() == 1.
+                #     assert data.next_observations.sum(dim=1).min() == data.next_observations.sum(dim=1).max() == 1.
+                # max_obs_index_batch = np.argmax(data.observations.cpu().numpy(), axis=1)
+                # max_next_obs_index_batch = np.argmax(data.next_observations.cpu().numpy(), axis=1)
+                # # import ipdb; ipdb.set_trace()
+                # for i in range(len(max_obs_index_batch)):
+                #     in_seen_set = (tuple(data.observations[i].tolist()), tuple(data.next_observations[i].tolist())) in s_sp_set
+                #     assert in_seen_set, f"{(tuple(data.observations[i].tolist()), tuple(data.next_observations[i].tolist()))} not in seen"
+                #     if args.is_tabular:
+                #         right = (np.absolute((max_obs_index_batch[i] - max_next_obs_index_batch[i])%10) == 1 or np.absolute((max_next_obs_index_batch[i] - max_obs_index_batch[i])%10) == 1)
+                #         # if not right:
+                #         #     print('pause')
+                #         #     import ipdb; ipdb.set_trace()
+                #         #     print('resume')
+                #         # print('bang')
+                #         assert right, f"Batch[{i}]: {max_obs_index_batch[i]} to {max_next_obs_index_batch[i]}"
+                #         assert np.absolute((max_obs_index_batch[i] - max_next_obs_index_batch[i])%10) == 1 or np.absolute((max_next_obs_index_batch[i] - max_obs_index_batch[i])%10) == 1, f"Batch[{i}]: {max_obs_index_batch[i]} to {max_next_obs_index_batch[i]}"
                 with torch.no_grad():
                     # Not max for all gammas, but action is max action for main gamma.
                     # target_max_all_gammas = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[1].cpu().numpy()
@@ -702,7 +462,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 cap_violations_average = 0.5* (violation_dict['cap_violations'] ** 2).mean()
                 last_gamma_cap_violations_average = (violation_dict['cap_violations'][:, -1, :] ** 2).mean()
                 last_gamma_constraint_loss = 0.5*((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
-                # import ipdb; ipdb.set_trace()
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
@@ -715,15 +474,32 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
                 if args.constraint_loss_scale > 0:
                     if args.scale_constraint_loss_by_vmax:
-                        total_loss = td_loss + (args.constraint_loss_scale * scaled_constraint_loss)
+                        total_loss = (args.td_loss_scale * td_loss) + (args.constraint_loss_scale * scaled_constraint_loss)
                         if args.cap_with_vmax and args.vmax_cap_method == "separate-regularization": # Don't love how messy this is.
                             total_loss += args.constraint_loss_scale * scaled_cap_violations_average
                     else:
-                        total_loss = td_loss + (args.constraint_loss_scale * constraint_loss)
+                        total_loss = (args.td_loss_scale * td_loss) + (args.constraint_loss_scale * constraint_loss)
                         if args.cap_with_vmax and args.vmax_cap_method == "separate-regularization":
                             total_loss += args.constraint_loss_scale * cap_violations_average
                 else:
-                    total_loss = td_loss
+                    total_loss = (args.td_loss_scale * td_loss)
+
+                upper_pairwise = violation_dict['upper_pairwise'].detach()
+                lower_pairwise = violation_dict['lower_pairwise'].detach()
+                # Very frustrating I wrote it this way. If only I had the authority to change it.
+                q_outputs_repeated = q_outputs.unsqueeze(1).repeat(1, q_outputs.shape[1], 1, 1)
+                pairwise_violations_above = torch.maximum(q_outputs_repeated - upper_pairwise, torch.tensor(0, dtype=torch.float32))
+                pairwise_violations_below = torch.maximum(lower_pairwise - q_outputs_repeated, torch.tensor(0, dtype=torch.float32))
+                pairwise_violations_recomputed = torch.maximum(pairwise_violations_above, pairwise_violations_below)
+                
+                # pairwise_violations_recomputed = torch.maximum(q_outputs_repeated - upper_pairwise, lower_pairwise - q_outputs_repeated)
+                pairwise_violation_mse = (pairwise_violations_recomputed ** 2).mean()
+
+                if args.pairwise_loss_scale > 0:
+                    # Seems like I compute losses in this file, annoyingly. So I should do it from the upper/lower bounds.
+                    total_loss = total_loss + args.pairwise_loss_scale * pairwise_violation_mse
+
+
 
                 log_frequency = 1000 if args.is_atari else 100
                 if global_step % log_frequency == 0:
@@ -740,6 +516,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['total_loss'].append((global_step, total_loss.item()))
                     log_dict['constraint_loss'].append((global_step, constraint_loss.item()))
                     log_dict['scaled_constraint_loss'].append((global_step, scaled_constraint_loss.item()))
+                    log_dict['pairwise_violation_mse'].append((global_step, pairwise_violation_mse.item()))
                     log_dict['q_values'].append((global_step, old_val.mean().item()))
                     log_dict['SPS'].append((global_step, int(global_step / (time.time() - start_time))))
                     log_dict['cap_violations_average'].append((global_step, cap_violations_average.item()))
@@ -758,16 +535,15 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                         # learned_q_values = q_network.network.weight.data.cpu().numpy().reshape(envs.single_observation_space.shape[0], len(gammas), envs.single_action_space.n)
                         assert learned_q_values.shape == true_q_values.shape, f"{learned_q_values.shape} vs {true_q_values.shape}"
                         tabular_total_mse_from_optimal = ((learned_q_values - true_q_values)**2).mean()
-                        tabular_smallest_gamma_mse_from_optimal = (learned_q_values[:,0,:] - true_q_values[:,0,:]).mean()
-                        tabular_largest_gamma_mse_from_optimal = (learned_q_values[:,0,:] - true_q_values[:,0,:]).mean()
+                        tabular_smallest_gamma_mse_from_optimal = ((learned_q_values[:,0,:] - true_q_values[:,0,:])**2).mean()
+                        tabular_largest_gamma_mse_from_optimal = ((learned_q_values[:,-1,:] - true_q_values[:,-1,:])**2).mean()
+
                         max_learned_q = learned_q_values.max()
                         max_q_from_buffer = old_val.max()
                         # print(f'tabular error: {tabular_total_mse_from_optimal:.4f}  max q value: {max_learned_q:.4f} max sampled {old_val.max():.4f} actual max q: {true_q_values.max():.4f} td_loss: {td_loss:.4f}')
                         log_dict['tabular_total_mse_from_optimal'].append((global_step, tabular_total_mse_from_optimal))
                         log_dict['tabular_smallest_gamma_mse_from_optimal'].append((global_step, tabular_smallest_gamma_mse_from_optimal))
                         log_dict['tabular_largest_gamma_mse_from_optimal'].append((global_step, tabular_largest_gamma_mse_from_optimal))
-                        # import ipdb; ipdb.set_trace()
-                        # print('neato')
 
 
                 # optimize the model

@@ -57,7 +57,7 @@ class CoefficientsModule(nn.Module):
         powers = torch.arange(0, out_until)[..., None]
         gammas_over_time = gammas ** powers
         total_abs_differences, biggest_abs_differences, coefficient_magnitudes, total_losses = [], [], [], []
-        # import ipdb; ipdb.set_trace()
+        # 
         for i in range(num_steps):
             optimizer.zero_grad()
             computed_over_time = torch.matmul(gammas_over_time, self.coefficients)

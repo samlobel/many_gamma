@@ -195,7 +195,7 @@ class ManyGammaQNetwork(nn.Module):
         # I should asser that the constraint loss is zero when rewards are 1 - gamma.
         self._upper_bounds = torch.tensor(self._upper_bounds, dtype=torch.float32)
         self._lower_bounds = torch.tensor(self._lower_bounds, dtype=torch.float32)
-        # import ipdb; ipdb.set_trace()
+        # 
 
         self._minimum_value = self._r_min / (1 - self._gammas)
         self._maximum_value = self._r_max / (1 - self._gammas)
@@ -222,7 +222,7 @@ class ManyGammaQNetwork(nn.Module):
         # constraint_dict_violated = self.get_constraint_computed_values_and_violations(test_output_violated, output=test_output_violated)
         # assert not constraint_dict_violated['lower_violations'].allclose(torch.tensor(0.), atol=1e-5)
         # print('all passed')
-        # import ipdb; ipdb.set_trace()
+        # 
         # print("neat")
 
 
@@ -550,7 +550,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 cap_violations_average = 0.5* (violation_dict['cap_violations'] ** 2).mean()
                 last_gamma_cap_violations_average = (violation_dict['cap_violations'][:, -1, :] ** 2).mean()
                 last_gamma_constraint_loss = 0.5*((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
-                # import ipdb; ipdb.set_trace()
+                # 
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
