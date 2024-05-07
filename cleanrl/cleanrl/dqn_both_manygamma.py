@@ -142,6 +142,14 @@ class ArgsBase:
     """How much to weight TD loss by. Set to 0 for only constraint optimization."""
     initialize_to_optimal: bool = False
     """Whether to initialize the Q-values to the optimal values (if tabular)."""
+    # These are up here because we can't add new things elsewhere, because we parse using argsclassic first. Silly but don't want to refactor.
+    tabular_kwargs_num_states: int = None
+    """Number of states in the tabular environment"""
+    tabular_kwargs_num_actions: int = None
+    """Number of actions in the tabular environment"""
+    tabular_kwargs_amount_noise_prob: float = None
+    """Amount of noise in the tabular environment"""
+
 
 
 class ArgsTabular(ArgsBase):
@@ -185,7 +193,7 @@ class ArgsAtari:
     train_frequency: int = 4
     """the frequency of training"""
 
-def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
+def make_env(env_id, seed, idx, capture_video, run_name, args):
     def thunk_atari():
         # TODO: Do I want this part changed to use something more like run_dir? Not sure how that will effect things like w&b
         if capture_video and idx == 0:
@@ -219,7 +227,26 @@ def make_env(env_id, seed, idx, capture_video, run_name, is_atari=False):
         env.action_space.seed(seed)
         return env
 
-    return thunk_atari if is_atari else thunk_flat # Seems like flat should work with Tabular as well.
+    def thunk_tabular():
+        tabular_kwargs = {}
+        for key in ['num_states', 'num_actions', 'amount_noise_prob']:
+            arg_key = "tabular_kwargs_" + key
+            arg_val = getattr(args, arg_key, None)
+            if arg_val is not None:
+                tabular_kwargs[key] = arg_val
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array", **tabular_kwargs)
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id, **tabular_kwargs)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env.action_space.seed(seed)
+        return env
+    if args.is_atari:
+        return thunk_atari
+    if args.is_tabular:
+        return thunk_tabular
+    return thunk_flat
 
 
 # ALGO LOGIC: initialize agent here:
@@ -296,7 +323,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, is_atari=args.is_atari) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, args=args) for i in range(args.num_envs)]
     )
 
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
@@ -423,7 +450,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 #     assert data.next_observations.sum(dim=1).min() == data.next_observations.sum(dim=1).max() == 1.
                 # max_obs_index_batch = np.argmax(data.observations.cpu().numpy(), axis=1)
                 # max_next_obs_index_batch = np.argmax(data.next_observations.cpu().numpy(), axis=1)
-                # # import ipdb; ipdb.set_trace()
                 # for i in range(len(max_obs_index_batch)):
                 #     in_seen_set = (tuple(data.observations[i].tolist()), tuple(data.next_observations[i].tolist())) in s_sp_set
                 #     assert in_seen_set, f"{(tuple(data.observations[i].tolist()), tuple(data.next_observations[i].tolist()))} not in seen"
@@ -431,7 +457,6 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 #         right = (np.absolute((max_obs_index_batch[i] - max_next_obs_index_batch[i])%10) == 1 or np.absolute((max_next_obs_index_batch[i] - max_obs_index_batch[i])%10) == 1)
                 #         # if not right:
                 #         #     print('pause')
-                #         #     import ipdb; ipdb.set_trace()
                 #         #     print('resume')
                 #         # print('bang')
                 #         assert right, f"Batch[{i}]: {max_obs_index_batch[i]} to {max_next_obs_index_batch[i]}"
