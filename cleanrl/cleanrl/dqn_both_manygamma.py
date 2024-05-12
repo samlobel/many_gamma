@@ -603,11 +603,13 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                         tabular_total_mse_from_optimal = ((learned_q_values - true_q_values)**2).mean()
                         tabular_smallest_gamma_mse_from_optimal = ((learned_q_values[:,0,:] - true_q_values[:,0,:])**2).mean()
                         tabular_largest_gamma_mse_from_optimal = ((learned_q_values[:,-1,:] - true_q_values[:,-1,:])**2).mean()
+                        tabular_total_l1_from_optimal = (np.absolute(learned_q_values - true_q_values)).mean()
 
                         max_learned_q = learned_q_values.max()
                         max_q_from_buffer = old_val.max()
                         # print(f'tabular error: {tabular_total_mse_from_optimal:.4f}  max q value: {max_learned_q:.4f} max sampled {old_val.max():.4f} actual max q: {true_q_values.max():.4f} td_loss: {td_loss:.4f}')
                         log_dict['tabular_total_mse_from_optimal'].append((global_step, tabular_total_mse_from_optimal))
+                        log_dict['tabular_total_l1_from_optimal'].append((global_step, tabular_total_l1_from_optimal))
                         log_dict['tabular_smallest_gamma_mse_from_optimal'].append((global_step, tabular_smallest_gamma_mse_from_optimal))
                         log_dict['tabular_largest_gamma_mse_from_optimal'].append((global_step, tabular_largest_gamma_mse_from_optimal))
 
