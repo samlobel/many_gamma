@@ -39,6 +39,8 @@ class InitializationModes(Enum):
     OPTIMAL_LAST_GAMMA_DOUBLE = 3
     OPTIMAL_FIRST_GAMMA_ZERO = 4
     OPTIMAL_FIRST_GAMMA_DOUBLE = 5
+    OPTIMAL_PLUS_NOISE = 6
+    OPTIMAL_PLUS_LOTS_OF_NOISE = 7
 
 @dataclass
 class ArgsBase:
@@ -381,6 +383,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_FIRST_GAMMA_DOUBLE.value:
             q_initialization = optimal_tensor.clone()
             q_initialization[:, 0, :] *= 2.
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_PLUS_NOISE.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization += (2 * torch.rand(*q_initialization.shape) - 1)
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_PLUS_LOTS_OF_NOISE.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization += (20 * torch.rand(*q_initialization.shape) - 10)
         else:
             raise Exception("Should have caught by now")
 
@@ -508,6 +516,23 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     td_target = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
                                                                 pass_through_constraint=args.apply_constraint_to_target, cap_by_vmax=args.use_clipping_for_target)
 
+                    # without_clipping = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
+                    #                                                     pass_through_constraint=False, cap_by_vmax=False)
+                    # difference_from_clipping = td_target - without_clipping
+                    # how_much_clipping_changes = difference_from_clipping[:, 0].mean()
+                    # # print(f"clipping changes smallest gamma's val by {how_much_clipping_changes:.4f}")
+                    # # print(f"Smallest gamma value now {td_target[:,0].mean():.4f}")
+                    # if global_step % 1000 == 0:
+                    #     without_clipping = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
+                    #                                                        pass_through_constraint=False, cap_by_vmax=False)
+                    #     difference_from_clipping = without_clipping - td_target
+                        # print('pausing')
+                        # import ipdb; ipdb.set_trace()
+                        # print('resuming')
+
+                    # if args.apply_constraint_to_target:
+                    #     use_clipping_for_target = args.use_clipping_for_target
+                    #     td_target = q_network.propagate_and_bound_v(td_target, use_clipping_for_target)
                     # raise Exception("Here")
                     # td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
                 # old_val = q_network(data.observations).gather(1, data.actions).squeeze()
@@ -515,6 +540,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 q_outputs = q_network(data.observations)
                 # old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze())
                 old_val = q_network.get_values_for_action(data.observations, data.actions.squeeze(), output=q_outputs) # [bs, num_gammas]
+                # print(old_val[:,0].mean().item(), td_target[:,0].mean().item())
+                # print(old_val[:,0].mean().item() - td_target[:,0].mean().item())
+                # print((old_val[:,0] - td_target[:,0]).min().item(), (old_val[:,0] - td_target[:,0]).max().item())
                 # raise Exception("here")
                 td_loss = F.mse_loss(td_target, old_val)
                 last_gamma_td_loss = F.mse_loss(td_target[:, -1], old_val[:, -1]) # was bs x n_gammas (no actions anymore)

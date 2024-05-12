@@ -316,8 +316,8 @@ class ManyGammaQNetwork(nn.Module):
 
         amount_changed = ((clipped_output - output)**2).mean().item()
         amount_smallest_gamma_changed = ((clipped_output - output)[:,0]**2).mean().item()
-        print(f"Propagating made total change by: {amount_changed:.7f}")
-        print(f"Propagating made smallest gamma change by: {amount_smallest_gamma_changed:.7f}")
+        # print(f"Propagating made total change by: {amount_changed:.7f}")
+        # print(f"Propagating made smallest gamma change by: {amount_smallest_gamma_changed:.7f}")
         return clipped_output
 
     def propagate_and_bound_q(self, output, cap_by_vmax=False):
