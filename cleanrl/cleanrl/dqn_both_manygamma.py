@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 import pickle
 from collections import defaultdict
+from enum import Enum
 
 from gamma_utilities import *
 from gradient_based_coefficients import CoefficientsModule
@@ -29,6 +30,15 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 
 import custom_envs # ZeroRewardEnv-v0, OneRewardEnv-v0
+
+
+class InitializationModes(Enum):
+    RANDOM = 0
+    OPTIMAL = 1
+    OPTIMAL_LAST_GAMMA_ZERO = 2
+    OPTIMAL_LAST_GAMMA_DOUBLE = 3
+    OPTIMAL_FIRST_GAMMA_ZERO = 4
+    OPTIMAL_FIRST_GAMMA_DOUBLE = 5
 
 @dataclass
 class ArgsBase:
@@ -118,6 +128,8 @@ class ArgsBase:
     """Even, log, or linear."""
     only_from_lower: bool = False
     """Whether to only constrain from lower gammas"""
+    skip_self_map: bool = False
+    """Whether or not to use the current gamma for constraining"""
     r_min: float = 0.0
     """Minimum per-step reward"""
     r_max: float = 1.0
@@ -140,8 +152,9 @@ class ArgsBase:
     """Which optimizer to use. Choices are adam and sgd"""
     td_loss_scale: float = 1.0
     """How much to weight TD loss by. Set to 0 for only constraint optimization."""
-    initialize_to_optimal: bool = False
-    """Whether to initialize the Q-values to the optimal values (if tabular)."""
+    # initialize_to_optimal: bool = False
+    # """Whether to initialize the Q-values to the optimal values (if tabular)."""
+    tabular_initialization_mode: int = InitializationModes.RANDOM.value
     # These are up here because we can't add new things elsewhere, because we parse using argsclassic first. Silly but don't want to refactor.
     tabular_kwargs_num_states: int = None
     """Number of states in the tabular environment"""
@@ -149,13 +162,18 @@ class ArgsBase:
     """Number of actions in the tabular environment"""
     tabular_kwargs_amount_noise_prob: float = None
     """Amount of noise in the tabular environment"""
+    apply_constraint_to_target: bool = False
+    """Whether to clip and propagate target values"""
+    use_clipping_for_target: bool = False
+    """Whether to clip and propagate target values"""
+
 
 
 
 class ArgsTabular(ArgsBase):
     env_id: str = "RandomTabularEnv-v0"
     """the id of the environment"""
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-2
     """the learning rate of the optimizer"""
     target_network_frequency: int = 1
     """the timesteps it takes to update the target network"""
@@ -288,7 +306,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
         # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.tag + '__' if args.tag else ''}{int(time.time())}"
 
-    if args.initialize_to_optimal:
+    if args.tabular_initialization_mode != InitializationModes.RANDOM.value:
         assert args.is_tabular, "Can only initialize to optimal if tabular"
 
     if args.track:
@@ -343,12 +361,33 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         # # true_q_values = [env.get_optimal_q_values_and_policy(g)[0][:,None,:] for g in gammas] # Add gamma dimension to stack
         # true_q_values = np.concatenate(true_q_values, axis=1) # [num_states, num_gammas, num_actions]
         # print('neato')
-            
 
-    # So, it doesn't transfer coefficients etc.
+    q_initialization = None
+    if args.is_tabular:
+        optimal_tensor = torch.tensor(true_q_values)
+        if args.tabular_initialization_mode == InitializationModes.RANDOM.value:
+            q_initialization = None
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL.value:
+            q_initialization = optimal_tensor.clone()
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_LAST_GAMMA_ZERO.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization[:, -1, :] = 0.
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_LAST_GAMMA_DOUBLE.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization[:, -1, :] *= 2.
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_FIRST_GAMMA_ZERO.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization[:, 0, :] = 0.
+        elif args.tabular_initialization_mode == InitializationModes.OPTIMAL_FIRST_GAMMA_DOUBLE.value:
+            q_initialization = optimal_tensor.clone()
+            q_initialization[:, 0, :] *= 2.
+        else:
+            raise Exception("Should have caught by now")
+
+    # So, it doesn't transfer coefficients etc. This is actually bad if we use the target network's constraints
     q_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
-        metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
+        metric=args.coefficient_metric, only_from_lower=args.only_from_lower, skip_self_map=args.skip_self_map,
         r_min=args.r_min, r_max=args.r_max,
         cap_with_vmax=args.cap_with_vmax,
         vmax_cap_method=args.vmax_cap_method,
@@ -356,8 +395,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
-        initialize_to_optimal=args.initialize_to_optimal,
-        optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
+        initialization_values=q_initialization,
+        # initialize_to_optimal=args.initialize_to_optimal,
+        # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
     assert args.optimizer.lower() in ("adam", "sgd"), args.optimizer
     if args.optimizer.lower() == "adam":
@@ -367,7 +407,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     # optimizer = optim.SGD(q_network.parameters(), lr=args.learning_rate)
     target_network = ManyGammaQNetwork(
         envs, gammas, constraint_regularization=args.constraint_regularization,
-        metric=args.coefficient_metric, only_from_lower=args.only_from_lower,
+        metric=args.coefficient_metric, only_from_lower=args.only_from_lower, skip_self_map=args.skip_self_map,
         r_min=args.r_min, r_max=args.r_max,
         cap_with_vmax=args.cap_with_vmax,
         vmax_cap_method=args.vmax_cap_method,
@@ -375,13 +415,12 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
-        initialize_to_optimal=args.initialize_to_optimal,
-        optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
+        initialization_values=q_initialization,
+        # initialize_to_optimal=args.initialize_to_optimal,
+        # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
     target_network.load_state_dict(q_network.state_dict())
 
-
-    # 
 
     rb = ReplayBuffer(
         args.buffer_size,
@@ -466,7 +505,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     # target_max_all_gammas = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[1].cpu().numpy()
                     # target_max, _ = target_network(data.next_observations).max(dim=1)
                     # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
-                    td_target = target_network.get_target_value(data.next_observations, data.rewards, data.dones)
+                    td_target = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
+                                                                pass_through_constraint=args.apply_constraint_to_target, cap_by_vmax=args.use_clipping_for_target)
+
                     # raise Exception("Here")
                     # td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
                 # old_val = q_network(data.observations).gather(1, data.actions).squeeze()
@@ -516,7 +557,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 pairwise_violations_above = torch.maximum(q_outputs_repeated - upper_pairwise, torch.tensor(0, dtype=torch.float32))
                 pairwise_violations_below = torch.maximum(lower_pairwise - q_outputs_repeated, torch.tensor(0, dtype=torch.float32))
                 pairwise_violations_recomputed = torch.maximum(pairwise_violations_above, pairwise_violations_below)
-                
+
                 # pairwise_violations_recomputed = torch.maximum(q_outputs_repeated - upper_pairwise, lower_pairwise - q_outputs_repeated)
                 pairwise_violation_mse = (pairwise_violations_recomputed ** 2).mean()
 

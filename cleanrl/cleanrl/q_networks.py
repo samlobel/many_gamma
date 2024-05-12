@@ -61,7 +61,7 @@ class ManyGammaQNetwork(nn.Module):
     # TODO: I'm not super happy with the coefficients nonsense. Maybe I should just focus on the pairwise part. Maybe
     # add an option for that being a separate constraint scale or whatever.
     def __init__(self, env, gammas, main_gamma_index=-1, constraint_regularization=0.0, metric="l2", skip_coefficient_solving=False,
-                 only_from_lower=False, r_min=-1.0, r_max=1.0,
+                 only_from_lower=False, skip_self_map=False, r_min=-1.0, r_max=1.0,
                  cap_with_vmax=False,
                  vmax_cap_method="pre-coefficient",
                  additive_constant=0.0,
@@ -69,8 +69,10 @@ class ManyGammaQNetwork(nn.Module):
                  neural_net_multiplier=1.0,
                  is_tabular=False,
                  use_pairwise_constraints=False,
-                 initialize_to_optimal=False,
-                optimal_init_values=None):
+                 initialization_values=None, # set to tensor if desired, only for tabular.
+                ):
+        if initialization_values is not None:
+            assert is_tabular, "Can only pass something besides none for tabular"
         assert r_max > r_min
         assert len(gammas) >= 1
         if not isinstance(gammas, (list, tuple)):
@@ -87,17 +89,18 @@ class ManyGammaQNetwork(nn.Module):
         self._additive_multiple_of_vmax = additive_multiple_of_vmax
         self._neural_net_multiplier = neural_net_multiplier
         self._use_pairwise_constraints = use_pairwise_constraints
-        self._initialize_to_optimal = initialize_to_optimal
-        self._optimal_init_values = optimal_init_values
+        self._initialization_values = initialization_values
 
 
         if metric == "l2":
             print("For now, transposing! Important change for sure")
-            self._constraint_matrix = torch.tensor(get_constraint_matrix(gammas, regularization=constraint_regularization), dtype=torch.float32)
+            self._constraint_matrix = torch.tensor(
+                get_constraint_matrix(gammas, regularization=constraint_regularization,
+                                      skip_self_map=skip_self_map, only_from_lower=only_from_lower),
+                                      dtype=torch.float32)
             self._constraint_matrix = self._constraint_matrix.T # Sadly necessary until we change the get_constraint_matrix function.
         else:
-            # TODO: principled decision on whether we should zero diagonal or not. Let's go with zero it.
-            coefficient_module = CoefficientsModule(self._gammas, regularization=constraint_regularization, skip_self_map=True, only_from_lower=only_from_lower)
+            coefficient_module = CoefficientsModule(self._gammas, regularization=constraint_regularization, skip_self_map=skip_self_map, only_from_lower=only_from_lower)
             if not skip_coefficient_solving: # We don't care about this for target network, skipping for convenience.
                 coefficient_module.solve(num_steps=10001, lr=0.001)
                 coefficient_module.solve(num_steps=10001, lr=0.0001)
@@ -164,13 +167,10 @@ class ManyGammaQNetwork(nn.Module):
             assert len(observation_shape) == 1 # gonna do it this way anyways
             network = nn.Linear(observation_shape[0], num_gammas * env.single_action_space.n) # Nothing fancy to see here.
             # 
-            if self._initialize_to_optimal:
-                # new_values = torch.tensor(self._optimal_init_values, dtype=torch.float32).reshape(network.weight.data.shape)
-                # network.weight.copy_(new_values)
-                # Seems like maybe I need to transpose the weights? That would be reasonable I guess.
-                assert self._optimal_init_values.shape[0] == observation_shape[0]
-                assert network.weight.data.shape[1] == self._optimal_init_values.shape[0]
-                new_weights_torch = torch.tensor(self._optimal_init_values, dtype=torch.float32).view((observation_shape[0], -1)).transpose(0, 1)
+            if self._initialization_values is not None:
+                assert self._initialization_values.shape[0] == observation_shape[0]
+                assert network.weight.data.shape[1] == self._initialization_values.shape[0]
+                new_weights_torch = torch.tensor(self._initialization_values, dtype=torch.float32).view((observation_shape[0], -1)).transpose(0, 1)
                 network.weight.data = nn.Parameter(new_weights_torch)
 
                 # new_weights = torch.tensor(self._optimal_init_values, dtype=torch.float32).reshape((observation_shape[0], -1))
@@ -178,11 +178,8 @@ class ManyGammaQNetwork(nn.Module):
                 # network.weight.data = nn.Parameter(new_weights)
                 # network.weight.data = torch.tensor(self._optimal_init_values, dtype=torch.float32).transpose(1, 2).reshape(network.weight.data.shape)
                 # network.bias.copy_(torch.zeros_like(network.bias.data))
-                # 
                 network.bias.data = nn.Parameter(torch.zeros_like(network.bias.data))
-            # print('about to pass through the identity to see if I recover the weights')
-            # 
-            # print('bing')
+
 
             return network
             # return nn.Linear(observation_shape[0], num_gammas * env.single_action_space.n) # Nothing fancy to see here.
@@ -262,7 +259,7 @@ class ManyGammaQNetwork(nn.Module):
         assert len(values.shape) == 2
         return values
 
-    def get_target_value(self, x_next, rewards, dones, output=None):
+    def get_target_value(self, x_next, rewards, dones, output=None, pass_through_constraint=False, cap_by_vmax=False):
         # assert len(x_next.shape) == 4
         assert rewards.shape[0] == x_next.shape[0]
         assert dones.shape[0] == x_next.shape[0]
@@ -272,6 +269,14 @@ class ManyGammaQNetwork(nn.Module):
         assert len(dones.shape) == 2
         
         _, best_values = self.get_best_actions_and_values(x_next, output=output)
+        if pass_through_constraint:
+            # I think this should probably happen on Q. Not sure why it matters SO much but still.
+            best_values = self.propagate_and_bound_v(best_values, cap_by_vmax=cap_by_vmax)
+        else:
+            if cap_by_vmax: # should do this either way to stay true to arguments.
+                best_values = torch.maximum(
+                    torch.minimum(best_values, self._maximum_value[None, :]),
+                    self._minimum_value[None, :])
         # 
         target_values = rewards + self._gammas[None, :] * best_values * (1 - dones)
         return target_values
@@ -281,6 +286,43 @@ class ManyGammaQNetwork(nn.Module):
     def get_pairwise_constraints(self, output):
             upper_bounds, lower_bounds, violations = get_upper_and_lower_bound_pairwise_constraints(output, self._gammas, self._r_min, self._r_max)
             return upper_bounds, lower_bounds, violations
+
+    def propagate_and_bound_v(self, output, cap_by_vmax=False):
+        assert len(output.shape) == 2
+        assert output.shape[1] == len(self._gammas)
+        if cap_by_vmax:
+            output = torch.maximum(
+                torch.minimum(output, self._maximum_value[None, :]),
+                self._minimum_value[None, :])
+
+        constraint_computed_output = torch.matmul(output, self._constraint_matrix)# Size [bs, num_gammas, num_actions]
+        assert constraint_computed_output.shape[0] == output.shape[0]
+        assert constraint_computed_output.shape[1] == len(self._gammas)
+        # Upper is the most that the constraint-computed is allowed to be above the actual.
+        # Lower is how much below the actual the constraint-computed is allowed to be.
+        # So, constraint_computed is smart averaging. We want to change it as little as possible.
+        # So we add/subtract upper/lower from constraint_computed, then clip original. Fine.
+        minimum_valid = constraint_computed_output - self._upper_bounds[None, :]
+        maximum_valid = constraint_computed_output + self._lower_bounds[None, :]
+
+        clipped_output = torch.maximum(
+            torch.minimum(output, maximum_valid),
+            minimum_valid)
+        # Shouldn't be needed anymore but will do anyways again. Slows it down I think
+        if cap_by_vmax:
+            clipped_output = torch.maximum(
+                torch.minimum(clipped_output, self._maximum_value[None, :]),
+                self._minimum_value[None, :])
+
+        amount_changed = ((clipped_output - output)**2).mean().item()
+        amount_smallest_gamma_changed = ((clipped_output - output)[:,0]**2).mean().item()
+        print(f"Propagating made total change by: {amount_changed:.7f}")
+        print(f"Propagating made smallest gamma change by: {amount_smallest_gamma_changed:.7f}")
+        return clipped_output
+
+    def propagate_and_bound_q(self, output, cap_by_vmax=False):
+        # For now, won't do this one.
+        raise Exception("Unimplemented")
 
     def get_constraint_computed_values_and_violations(self, x, semi_gradient=False, normalize=None, output=None):
         # assert normalize in (None, 'none', 'l2', 'l1')
