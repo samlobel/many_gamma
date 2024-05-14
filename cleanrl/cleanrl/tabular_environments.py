@@ -127,7 +127,8 @@ class TabularEnv(gym.Env):
 
 
 class RandomTabularEnv(TabularEnv):
-    def __init__(self, num_states=10, num_actions=2):
+    # amount_noise_prob is just for compatibility
+    def __init__(self, num_states=10, num_actions=2, amount_noise_prob=0.1):
         transition_tensor = sample_transition_function(num_states, num_actions)
         reward_matrix = np.random.uniform(size=(num_states, num_actions))
         initial_distribution = sample_random_simplex_vector(num_states)
@@ -145,7 +146,7 @@ class RandomTabularEnv(TabularEnv):
     #     return next_state, reward, done, {}
 
 class SparseRewardRandomTabularEnv(TabularEnv):
-    def __init__(self, num_states=10, num_actions=2):
+    def __init__(self, num_states=10, num_actions=2, amount_noise_prob=0.1):
         transition_tensor = sample_transition_function(num_states, num_actions)
         reward_matrix = np.zeros((num_states, num_actions))
         reward_matrix[-1, -1] = 1
@@ -153,7 +154,7 @@ class SparseRewardRandomTabularEnv(TabularEnv):
         super().__init__(num_states, num_actions, transition_tensor, reward_matrix, initial_distribution)
 
 class SparseRewardSparsishTransitionTabularEnv(TabularEnv):
-    def __init__(self, num_states=10, num_actions=2):
+    def __init__(self, num_states=10, num_actions=2, amount_noise_prob=0.1):
         transition_tensor = sample_transition_function(num_states, num_actions)
         transition_tensor = transition_tensor**4
         transition_tensor = transition_tensor / np.sum(transition_tensor, axis=-1, keepdims=True)
@@ -163,7 +164,7 @@ class SparseRewardSparsishTransitionTabularEnv(TabularEnv):
         super().__init__(num_states, num_actions, transition_tensor, reward_matrix, initial_distribution)
 
 class SparseRewardAbsorbingStateTabularEnv(TabularEnv):
-    def __init__(self, num_states=10, num_actions=2):
+    def __init__(self, num_states=10, num_actions=2, amount_noise_prob=0.1):
         transition_tensor = sample_transition_function(num_states, num_actions)
         transition_tensor[0] = 0
         transition_tensor[0,:,0] = 1
