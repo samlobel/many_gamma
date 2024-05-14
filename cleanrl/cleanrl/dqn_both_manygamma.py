@@ -171,7 +171,7 @@ class ArgsBase:
 
 
 
-
+@dataclass
 class ArgsTabular(ArgsBase):
     env_id: str = "RandomTabularEnv-v0"
     """the id of the environment"""
@@ -184,6 +184,7 @@ class ArgsTabular(ArgsBase):
     is_tabular: bool = True
     """Determines stuff like logging I think"""
 
+@dataclass
 class ArgsClassic(ArgsBase):
     # Since just same as before.
     pass
@@ -546,6 +547,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 # raise Exception("here")
                 td_loss = F.mse_loss(td_target, old_val)
                 last_gamma_td_loss = F.mse_loss(td_target[:, -1], old_val[:, -1]) # was bs x n_gammas (no actions anymore)
+                first_gamma_td_loss = F.mse_loss(td_target[:, 0], old_val[:, 0]) # was bs x n_gammas (no actions anymore)
 
                 violation_dict = q_network.get_constraint_computed_values_and_violations(
                     data.observations, semi_gradient=args.semigradient_constraint,
@@ -553,9 +555,9 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                 upper_violations = violation_dict['upper_violations'] # actions last
                 lower_violations = violation_dict['lower_violations'] # actions last
                 # cap violations is batch, gamma, actions
-                cap_violations_average = 0.5* (violation_dict['cap_violations'] ** 2).mean()
+                cap_violations_average = 0.5 * (violation_dict['cap_violations'] ** 2).mean()
                 last_gamma_cap_violations_average = (violation_dict['cap_violations'][:, -1, :] ** 2).mean()
-                last_gamma_constraint_loss = 0.5*((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
+                last_gamma_constraint_loss = 0.5 * ((upper_violations[:, -1, :]**2).mean() + (lower_violations[:, -1, :]**2).mean())
                 # td_loss = loss
                 # constraint_loss = (upper_violations.mean() + lower_violations.mean())
                 constraint_loss = 0.5*((upper_violations**2).mean() + (lower_violations**2).mean())
@@ -620,6 +622,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['last_gamma_constraint_loss'].append((global_step, last_gamma_constraint_loss.item()))
                     log_dict['last_gamma_q_values'].append((global_step, old_val[:, -1].mean().item()))
                     log_dict['last_gamma_td_loss'].append((global_step, last_gamma_td_loss.item()))
+
+                    log_dict['first_gamma_td_loss'].append((global_step, first_gamma_td_loss.item()))
 
                     if args.is_tabular:
                         # I could do the pass through thing instead, maybe that's actually easier.

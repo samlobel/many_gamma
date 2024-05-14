@@ -170,7 +170,8 @@ class ManyGammaQNetwork(nn.Module):
             if self._initialization_values is not None:
                 assert self._initialization_values.shape[0] == observation_shape[0]
                 assert network.weight.data.shape[1] == self._initialization_values.shape[0]
-                new_weights_torch = torch.tensor(self._initialization_values, dtype=torch.float32).view((observation_shape[0], -1)).transpose(0, 1)
+                # new_weights_torch = torch.tensor(self._initialization_values, dtype=torch.float32).view((observation_shape[0], -1)).transpose(0, 1)
+                new_weights_torch = self._initialization_values.clone().float().view((observation_shape[0], -1)).transpose(0, 1)
                 network.weight.data = nn.Parameter(new_weights_torch)
 
                 # new_weights = torch.tensor(self._optimal_init_values, dtype=torch.float32).reshape((observation_shape[0], -1))
@@ -295,7 +296,7 @@ class ManyGammaQNetwork(nn.Module):
                 torch.minimum(output, self._maximum_value[None, :]),
                 self._minimum_value[None, :])
 
-        constraint_computed_output = torch.matmul(output, self._constraint_matrix)# Size [bs, num_gammas, num_actions]
+        constraint_computed_output = torch.matmul(output, self._constraint_matrix)# Size [bs, num_gammas]
         assert constraint_computed_output.shape[0] == output.shape[0]
         assert constraint_computed_output.shape[1] == len(self._gammas)
         # Upper is the most that the constraint-computed is allowed to be above the actual.
@@ -430,3 +431,51 @@ class ManyGammaQNetwork(nn.Module):
             'upper_pairwise': upper_bounds,
             'lower_pairwise': lower_bounds,
         }
+
+
+
+
+if __name__ == '__main__':
+    # Let's do this the right way.
+    from gamma_utilities import get_even_spacing
+    import gymnasium as gym
+    NUM_GAMMAS = 5
+    r_min = -1
+    r_max = 1
+    reward_sequence_1 = [r_max]*15 + [r_min]*300
+    reward_sequence_2 = [r_min]*30 + [r_max]*300
+    reward_sequence_3 = np.random.uniform(low=r_min, high=r_max, size=(330,)).tolist()
+    gammas = get_even_spacing(0.8, 0.99, NUM_GAMMAS)
+    values_1 = torch.zeros(len(gammas))
+    values_2 = torch.zeros(len(gammas))
+    values_3 = torch.zeros(len(gammas))
+    for i, gamma in enumerate(gammas):
+        values_1[i] = sum([r * gamma**i for i, r in enumerate(reward_sequence_1)])
+        values_2[i] = sum([r * gamma**i for i, r in enumerate(reward_sequence_2)])
+        values_3[i] = sum([r * gamma**i for i, r in enumerate(reward_sequence_3)])
+    values_1 = values_1[None, :, None].repeat(1, 1, 2)
+    values_2 = values_2[None, :, None].repeat(1, 1, 2)
+    values_3 = values_3[None, :, None].repeat(1, 1, 2)
+    def thunk(): return gym.make("CartPole-v1")
+    envs = gym.vector.SyncVectorEnv([thunk])
+
+    for values in [values_1, values_2, values_3]:
+        # for constraint_regularization in [0.001, 0.01, 0.1, 1.0]:
+        for constraint_regularization in [0.001, 0.1, 1.0, 0.1, 0.01, 0.001]:
+            for skip_self_map in [False, True]:
+                for only_from_lower in [True, False]:
+                    q_network = ManyGammaQNetwork(envs, gammas=gammas, constraint_regularization=constraint_regularization,
+                                                r_min=r_min, r_max=r_max,
+                                                skip_self_map=skip_self_map, only_from_lower=only_from_lower)
+                    print(q_network._constraint_matrix.shape)
+                    print(values.shape)
+                    constraint_dict_1 = q_network.get_constraint_computed_values_and_violations(values, output=values)
+                    total_violations = constraint_dict_1['upper_violations'].absolute().sum() + constraint_dict_1['lower_violations'].absolute().sum()
+                    total_pairwise_violations = constraint_dict_1['pairwise_violations'].absolute().sum()
+                    # import ipdb; ipdb.set_trace()
+                    # assert torch.allclose(values, constraint_dict_1['constraint_computed_output'])
+                    assert total_violations == 0
+                    # print(total_pairwise_violations)
+                    # assert total_pairwise_violations <= 0.1, total_pairwise_violations
+            # import ipdb; ipdb.set_trace()
+            # print('neato')
