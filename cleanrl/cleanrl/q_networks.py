@@ -157,6 +157,8 @@ class ManyGammaQNetwork(nn.Module):
         self._constraint_matrix = self._constraint_matrix.to(*args, **kwargs)
         self._upper_bounds = self._upper_bounds.to(*args, **kwargs)
         self._lower_bounds = self._lower_bounds.to(*args, **kwargs)
+        self._maximum_value = self._maximum_value.to(*args, **kwargs)
+        self._minimum_value = self._minimum_value.to(*args, **kwargs)
         return self
 
     def _make_network(self, env, num_gammas, is_tabular=False):
