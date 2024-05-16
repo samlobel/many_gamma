@@ -68,6 +68,8 @@ class ManyGammaQNetwork(nn.Module):
                  additive_multiple_of_vmax=0.0,
                  neural_net_multiplier=1.0,
                  is_tabular=False,
+                 is_atari=False,
+                 is_minatar=False,
                  use_pairwise_constraints=False,
                  initialization_values=None, # set to tensor if desired, only for tabular.
                 ):
@@ -124,10 +126,15 @@ class ManyGammaQNetwork(nn.Module):
         self._maximum_value = self._r_max / (1 - self._gammas)
 
         self.is_tabular = is_tabular
+        self.is_atari = is_atari
+        self.is_minatar = is_minatar
 
         super().__init__()
         
-        self.network = self._make_network(env, len(gammas), is_tabular=is_tabular)
+        self.network = self._make_network(env, len(gammas),
+                                          is_tabular=is_tabular,
+                                          is_atari=is_atari,
+                                          is_minatar=is_minatar)
 
         # # Make sure that constraints are not violated for consistent inputs
         # test_output_big = (1 / (1 - self._gammas))[None, ...][..., None].repeat(1, 1, 3)
@@ -161,7 +168,7 @@ class ManyGammaQNetwork(nn.Module):
         self._minimum_value = self._minimum_value.to(*args, **kwargs)
         return self
 
-    def _make_network(self, env, num_gammas, is_tabular=False):
+    def _make_network(self, env, num_gammas, is_tabular=False, is_atari=False, is_minatar=False):
         observation_shape = env.single_observation_space.shape
         assert len(observation_shape) in (1, 3), observation_shape
         if is_tabular:
@@ -186,17 +193,9 @@ class ManyGammaQNetwork(nn.Module):
 
             return network
             # return nn.Linear(observation_shape[0], num_gammas * env.single_action_space.n) # Nothing fancy to see here.
-        if len(observation_shape) == 1:
-            print("Flat NN")
-            return nn.Sequential(
-                nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
-                nn.ReLU(),
-                nn.Linear(120, 84),
-                nn.ReLU(),
-                nn.Linear(84, num_gammas * env.single_action_space.n),
-            )
-        else:
-            print("Conv NN")
+        elif is_atari:
+            print("Conv NN (Atari)")
+            assert len(observation_shape) == 3, "Channels etc"
             return nn.Sequential(
                 nn.Conv2d(4, 32, 8, stride=4),
                 nn.ReLU(),
@@ -209,6 +208,35 @@ class ManyGammaQNetwork(nn.Module):
                 nn.ReLU(),
                 # nn.Linear(512, env.single_action_space.n),
                 nn.Linear(512, num_gammas * env.single_action_space.n),
+            )
+        elif is_minatar:
+            print("Conv NN (MinAtar)")
+            assert len(observation_shape) == 3, "Channels etc"
+            in_channels = env.single_observation_space.shape[0]
+            out_channels = 16
+            kernel_size = 3
+            stride = 1
+            width_height = 10
+            width_conv_output = (width_height - (kernel_size - 1) - 1) // stride + 1
+            size_fc_in = width_conv_output ** 2 * out_channels
+
+            return nn.Sequential(
+                nn.Conv2d(in_channels, 16, kernel_size=3, stride=1),
+                nn.Flatten(),
+                nn.ReLU(),
+                nn.Linear(size_fc_in, 128),
+                nn.ReLU(),
+                nn.Linear(128, num_gammas * env.single_action_space.n),
+            )
+        else:
+            print("Flat NN")
+            assert len(observation_shape) == 1, "Should be flat env if gets here"
+            return nn.Sequential(
+                nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+                nn.ReLU(),
+                nn.Linear(120, 84),
+                nn.ReLU(),
+                nn.Linear(84, num_gammas * env.single_action_space.n),
             )
 
     def forward(self, x):

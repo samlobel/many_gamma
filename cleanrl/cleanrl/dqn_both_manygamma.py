@@ -116,6 +116,8 @@ class ArgsBase:
     """One above directory name for experiment"""
     is_atari: bool = False
     """Determines Network Shape etc"""
+    is_minatar: bool = False
+    """Determines Network Shape etc"""
     is_tabular: bool = False
     """Determines stuff like logging I think"""
     semigradient_constraint: bool = False
@@ -193,7 +195,7 @@ class ArgsClassic(ArgsBase):
 
 
 @dataclass
-class ArgsAtari:
+class ArgsAtari(ArgsBase):
     # Algorithm specific arguments
     env_id: str = "BreakoutNoFrameskip-v4"
     """the id of the environment"""
@@ -215,6 +217,44 @@ class ArgsAtari:
     """timestep to start learning"""
     train_frequency: int = 4
     """the frequency of training"""
+
+@dataclass
+class ArgsMinAtar(ArgsBase):
+    env_id = "MinAtar/Breakout-v1"
+    """the id of the environment"""
+    is_minatar: bool = True
+    """Whether MinAtar"""
+    total_timesteps: int = 5000000
+    """total timesteps of the experiments"""
+    learning_rate: float = 2.5e-4 # There are also other optimizer parameters: grad_momentum, squared_grad_momentum.
+    """the learning rate of the optimizer"""
+    end_e: float = 0.1
+    """the ending epsilon for exploration"""
+    train_frequency: int = 1
+    """the frequency of training"""
+    batch_size: int = 32
+    """the batch size of sample from the reply memory"""
+    target_network_frequency: int = 1000
+    """the timesteps it takes to update the target network"""
+    buffer_size: int = 100000
+    """the replay memory buffer size"""
+    exploration_fraction: float = 0.02
+    """the fraction of `total-timesteps` it takes from start-e to go end-e"""
+    learning_starts: int = 5000
+    """timestep to start learning"""
+
+
+class MinAtarWrapper(gym.ObservationWrapper):
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        observation_shape = env.observation_space.shape
+        assert len(observation_shape) == 3
+        assert observation_shape[0] == observation_shape[1] == 10
+        new_observation_shape = (observation_shape[2], observation_shape[0], observation_shape[1])
+        self.observation_space = gym.spaces.Box(low=0, high=1, shape=new_observation_shape, dtype=np.float32)
+
+    def observation(self, observation):
+        return observation.transpose(2, 0, 1)
 
 def make_env(env_id, seed, idx, capture_video, run_name, args):
     def thunk_atari():
@@ -250,6 +290,17 @@ def make_env(env_id, seed, idx, capture_video, run_name, args):
         env.action_space.seed(seed)
         return env
 
+    def thunk_minatar():
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = MinAtarWrapper(env)
+        env.action_space.seed(seed)
+        return env
+
     def thunk_tabular():
         tabular_kwargs = {}
         for key in ['num_states', 'num_actions', 'amount_noise_prob']:
@@ -267,6 +318,8 @@ def make_env(env_id, seed, idx, capture_video, run_name, args):
         return env
     if args.is_atari:
         return thunk_atari
+    if args.is_minatar:
+        return thunk_minatar
     if args.is_tabular:
         return thunk_tabular
     return thunk_flat
@@ -293,11 +346,19 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 """
         )
     args = tyro.cli(ArgsClassic)
-    assert not (args.is_atari and args.is_tabular), "Shouldn't be both"
+
+    num_is_flags = sum([1 if val else 0 for val in [args.is_atari, args.is_tabular, args.is_minatar]])
+    assert num_is_flags <= 1, "Shouldn't be more than one"
+
     if args.is_atari:
         args = tyro.cli(ArgsAtari) # Different defaults
     if args.is_tabular:
         args = tyro.cli(ArgsTabular) # Different defaults
+    if args.is_minatar:
+        args = tyro.cli(ArgsMinAtar)
+
+    if args.is_minatar:
+        assert args.env_id.startswith("MinAtar/")
 
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     # if not args.cap_with_vmax: # Actually I won't do this as to not mess up my onager stuff.
@@ -406,6 +467,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
+        is_atari=args.is_atari,
+        is_minatar=args.is_minatar,
         initialization_values=q_initialization,
         # initialize_to_optimal=args.initialize_to_optimal,
         # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
@@ -426,6 +489,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         additive_multiple_of_vmax=args.additive_multiple_of_vmax,
         neural_net_multiplier=args.neural_net_multiplier,
         is_tabular=args.is_tabular,
+        is_atari=args.is_atari,
+        is_minatar=args.is_minatar,
         initialization_values=q_initialization,
         # initialize_to_optimal=args.initialize_to_optimal,
         # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
