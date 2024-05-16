@@ -168,6 +168,8 @@ class ArgsBase:
     """Whether to clip and propagate target values"""
     use_clipping_for_target: bool = False
     """Whether to clip and propagate target values"""
+    double_q_learning: bool = False
+    """Whether to use q_network for target_network's action selection"""
 
 
 
@@ -514,8 +516,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     # target_max_all_gammas = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[1].cpu().numpy()
                     # target_max, _ = target_network(data.next_observations).max(dim=1)
                     # td_target_all_gammas = data.rewards.flatten() + args.gamma * target_max_all_gammas * (1 - data.dones.flatten())
+                    q_for_action_selection = q_network if args.double_q_learning else None
                     td_target = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
-                                                                pass_through_constraint=args.apply_constraint_to_target, cap_by_vmax=args.use_clipping_for_target)
+                                                                pass_through_constraint=args.apply_constraint_to_target, cap_by_vmax=args.use_clipping_for_target,
+                                                                q_for_action_selection=q_for_action_selection)
 
                     # without_clipping = target_network.get_target_value(data.next_observations, data.rewards, data.dones,
                     #                                                     pass_through_constraint=False, cap_by_vmax=False)

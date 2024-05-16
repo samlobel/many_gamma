@@ -262,7 +262,11 @@ class ManyGammaQNetwork(nn.Module):
         assert len(values.shape) == 2
         return values
 
-    def get_target_value(self, x_next, rewards, dones, output=None, pass_through_constraint=False, cap_by_vmax=False):
+    def get_target_value(self, x_next, rewards, dones,
+                        #  output=None, # Doesn't really make sense to have "output" here, right?
+                         pass_through_constraint=False, cap_by_vmax=False,
+                         q_for_action_selection=None):
+        # maximizing_acitons lets us do double-dqn.
         # assert len(x_next.shape) == 4
         assert rewards.shape[0] == x_next.shape[0]
         assert dones.shape[0] == x_next.shape[0]
@@ -270,8 +274,13 @@ class ManyGammaQNetwork(nn.Module):
         assert dones.shape[1] == 1
         assert len(rewards.shape) == 2
         assert len(dones.shape) == 2
-        
-        _, best_values = self.get_best_actions_and_values(x_next, output=output)
+        assert q_for_action_selection is None or isinstance(q_for_action_selection, ManyGammaQNetwork)
+
+        if q_for_action_selection is not None:
+            best_actions, _ = q_for_action_selection.get_best_actions_and_values(x_next)
+            best_values = self.get_values_for_action(x_next, best_actions) # Very possible shape is wrong.
+        else:
+            _, best_values = self.get_best_actions_and_values(x_next)
         if pass_through_constraint:
             # I think this should probably happen on Q. Not sure why it matters SO much but still.
             best_values = self.propagate_and_bound_v(best_values, cap_by_vmax=cap_by_vmax)
