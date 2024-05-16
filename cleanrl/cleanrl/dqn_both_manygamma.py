@@ -358,6 +358,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         args = tyro.cli(ArgsMinAtar)
 
     if args.is_minatar:
+        args.env_id in ("Asterix-v1", "Breakout-v1", "Freeway-v1", "Seaquest-v1", "SpaceInvaders-v1",)
+        args.env_id = f"MinAtar/{args.env_id}"
         assert args.env_id.startswith("MinAtar/")
 
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
