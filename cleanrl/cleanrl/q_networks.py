@@ -92,6 +92,7 @@ class ManyGammaQNetwork(nn.Module):
         self._neural_net_multiplier = neural_net_multiplier
         self._use_pairwise_constraints = use_pairwise_constraints
         self._initialization_values = initialization_values
+        self._constraint_regularization = constraint_regularization
 
 
         if metric == "l2":

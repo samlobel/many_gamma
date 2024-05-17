@@ -415,8 +415,11 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     assert args.gamma_spacing in ("even", "log", "linear"), args.gamma_spacing
-    gamma_choosing_func = {"even": get_even_spacing, "log": get_even_log_spacing, "linear": np.linspace}[args.gamma_spacing]
-    gammas = gamma_choosing_func(args.gamma_lower, args.gamma_upper, args.num_gammas)
+    if args.num_gammas == 1:
+        gammas = [args.gamma_upper]
+    else:
+        gamma_choosing_func = {"even": get_even_spacing, "log": get_even_log_spacing, "linear": np.linspace}[args.gamma_spacing]
+        gammas = gamma_choosing_func(args.gamma_lower, args.gamma_upper, args.num_gammas)
     print(gammas)
 
     if args.is_tabular:
