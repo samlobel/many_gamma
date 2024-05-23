@@ -671,7 +671,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
 
 
-                log_frequency = 1000 if args.is_atari else 100
+                log_frequency = 1000 if (args.is_atari or args.is_minatar) else 100
                 if global_step % log_frequency == 0:
                     # writer.add_scalar("losses/td_loss", loss, global_step)
                     writer.add_scalar("losses/td_loss", td_loss, global_step)
