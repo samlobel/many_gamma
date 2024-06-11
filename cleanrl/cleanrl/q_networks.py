@@ -169,6 +169,12 @@ class ManyGammaQNetwork(nn.Module):
         self._minimum_value = self._minimum_value.to(*args, **kwargs)
         return self
 
+    def copy_constraints(self, other_q):
+        assert isinstance(other_q, ManyGammaQNetwork)
+        self._constraint_matrix.copy_(other_q._constraint_matrix)
+        self._upper_bounds.copy_(other_q._upper_bounds)
+        self._lower_bounds.copy_(other_q._lower_bounds)
+
     def _make_network(self, env, num_gammas, is_tabular=False, is_atari=False, is_minatar=False):
         observation_shape = env.single_observation_space.shape
         assert len(observation_shape) in (1, 3), observation_shape
@@ -244,7 +250,10 @@ class ManyGammaQNetwork(nn.Module):
         # Now this returns all the values, reshaped so that each gamma has a vector of action-values
         # Will this always be a batch? I don't really know but let's say yeah.
         # Size [bs, num_gammas, num_actions]
-        if len(self._observation_space_shape) == 3:
+        # TODO: Is it weird that I do this like so? Seems like I should just use is_atari instead.
+        # Seems very possible this was borking some of the Minatar things.
+        if self.is_atari:
+        # if len(self._observation_space_shape) == 3:
             assert len(x.shape) == 4
             output = self.network(x / 255.0).view(-1, len(self._gammas), self._num_actions)
         else:
@@ -258,16 +267,35 @@ class ManyGammaQNetwork(nn.Module):
         
         return output
     
-    def get_best_actions_and_values(self, x, output=None):
+    def get_best_actions_and_values_and_info(self, x, output=None, constrain=False):
         # Cache output if necessary
         # assert len(x.shape) == 4
         # output = self.network(x).view(-1, len(self._gammas), self._num_actions)
         output = self.forward(x) if output is None else output
         # assert len(output.shape) == len(x.shape) + 1
-        best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
+        
+        if constrain:
+            constrained_output = self.propagate_and_bound_q(output)
+            best_actions = torch.argmax(constrained_output[:, self._main_gamma_index, :], dim=1)
+            old_best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
+            are_same_floats = (best_actions == old_best_actions).float()
+            output_to_use = constrained_output
+            # output_diff_on_last = (constrained_output - output)[:, self._main_gamma_index, :]
+            # print(output_diff_on_last.min(), output_diff_on_last.max())
+            # import ipdb; ipdb.set_trace()
+            # print('neato')
+        else:
+            best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
+            output_to_use = output
+            are_same_floats = torch.ones_like(best_actions).float()
+        
+            
+
+        # best_actions = torch.argmax(output[:, self._main_gamma_index, :], dim=1)
         assert best_actions.shape[0] == x.shape[0]
         assert len(best_actions.shape) == 1
-        best_values = output[torch.arange(output.shape[0]), :, best_actions]
+
+        best_values = output_to_use[torch.arange(output_to_use.shape[0]), :, best_actions]
         assert best_values.shape[0] == x.shape[0]
         assert best_values.shape[1] == len(self._gammas)
         # for i in range(len(output)):
@@ -276,7 +304,7 @@ class ManyGammaQNetwork(nn.Module):
         # print('nice')
 
         assert len(best_values.shape) == 2
-        return best_actions, best_values
+        return best_actions, best_values, {'are_same_floats': are_same_floats}
 
     def get_values_for_action(self, x, actions, output=None):
         assert len(actions.shape) == 1
@@ -306,10 +334,10 @@ class ManyGammaQNetwork(nn.Module):
         assert q_for_action_selection is None or isinstance(q_for_action_selection, ManyGammaQNetwork)
 
         if q_for_action_selection is not None:
-            best_actions, _ = q_for_action_selection.get_best_actions_and_values(x_next)
+            best_actions, _ , _ = q_for_action_selection.get_best_actions_and_values_and_info(x_next)
             best_values = self.get_values_for_action(x_next, best_actions) # Very possible shape is wrong.
         else:
-            _, best_values = self.get_best_actions_and_values(x_next)
+            _, best_values, _ = self.get_best_actions_and_values_and_info(x_next)
         if pass_through_constraint:
             # I think this should probably happen on Q. Not sure why it matters SO much but still.
             best_values = self.propagate_and_bound_v(best_values, cap_by_vmax=cap_by_vmax)
@@ -355,15 +383,33 @@ class ManyGammaQNetwork(nn.Module):
                 torch.minimum(clipped_output, self._maximum_value[None, :]),
                 self._minimum_value[None, :])
 
-        amount_changed = ((clipped_output - output)**2).mean().item()
-        amount_smallest_gamma_changed = ((clipped_output - output)[:,0]**2).mean().item()
+        # amount_changed = ((clipped_output - output)**2).mean().item()
+        # amount_smallest_gamma_changed = ((clipped_output - output)[:,0]**2).mean().item()
         # print(f"Propagating made total change by: {amount_changed:.7f}")
         # print(f"Propagating made smallest gamma change by: {amount_smallest_gamma_changed:.7f}")
         return clipped_output
 
     def propagate_and_bound_q(self, output, cap_by_vmax=False):
         # For now, won't do this one.
-        raise Exception("Unimplemented")
+        # Time to do this one. What to do. 
+        assert len(output.shape) == 3
+        assert output.shape[1] == len(self._gammas)
+        if cap_by_vmax:
+            output = torch.maximum(
+                torch.minimum(output, self._maximum_value[None, :, None]),
+                self._minimum_value[None, :, None])
+
+        output_transposed = output.transpose(1, 2) # Size [bs, num_actions, num_gammas]
+        constraint_computed_output = torch.matmul(output_transposed, self._constraint_matrix).transpose(1, 2)
+        assert constraint_computed_output.shape == output.shape
+
+        minimum_valid = constraint_computed_output - self._upper_bounds[None, :, None]
+        maximum_valid = constraint_computed_output + self._lower_bounds[None, :, None]
+        clipped_output = torch.maximum(
+            torch.minimum(output, maximum_valid),
+            minimum_valid)
+
+        return clipped_output
 
     def get_constraint_computed_values_and_violations(self, x, semi_gradient=False, normalize=None, output=None):
         # assert normalize in (None, 'none', 'l2', 'l1')

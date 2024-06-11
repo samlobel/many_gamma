@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pickle
 from collections import defaultdict
 from enum import Enum
+from collections import deque
 
 from gamma_utilities import *
 from gradient_based_coefficients import CoefficientsModule
@@ -172,6 +173,8 @@ class ArgsBase:
     """Whether to clip and propagate target values"""
     double_q_learning: bool = False
     """Whether to use q_network for target_network's action selection"""
+    use_constraints_for_action_selection: bool = False
+    """Whether to use constraint matrix for action selection"""
 
 
 
@@ -501,6 +504,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
     target_network.load_state_dict(q_network.state_dict())
+    target_network.copy_constraints(q_network)
+    
 
 
     rb = ReplayBuffer(
@@ -512,6 +517,10 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         optimize_memory_usage=False, # When true it doesn't handle termination correctly.
         handle_timeout_termination=False,
     )
+
+    action_change_queue = deque(maxlen=1000)
+    action_change_queue.append(0.0)
+
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
@@ -524,7 +533,13 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         else:
             # q_values = q_network(torch.Tensor(obs).to(device))
             # actions = torch.argmax(q_values, dim=1).cpu().numpy()
-            actions = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device))[0].cpu().numpy()
+            # actions = q_network.get_best_actions_and_values(torch.Tensor(obs).to(device), constrain=args.use_constraints_for_action_selection)[0].cpu().numpy()
+            actions, q_values, action_infos = q_network.get_best_actions_and_values_and_info(torch.Tensor(obs).to(device), constrain=args.use_constraints_for_action_selection)
+            actions = actions.cpu().numpy()
+            action_change_queue.append(1 - action_infos['are_same_floats'].detach().cpu().item())
+            # [0].cpu().numpy()
+            # if args.use_constraints_for_action_selection:
+
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
@@ -698,6 +713,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
                     log_dict['last_gamma_td_loss'].append((global_step, last_gamma_td_loss.item()))
 
                     log_dict['first_gamma_td_loss'].append((global_step, first_gamma_td_loss.item()))
+                    log_dict['action_change_fraction'].append((global_step, np.mean(action_change_queue)))
+                    print("action change fraction", np.mean(action_change_queue))
 
                     if args.is_tabular:
                         # I could do the pass through thing instead, maybe that's actually easier.
