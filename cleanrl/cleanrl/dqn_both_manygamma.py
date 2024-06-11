@@ -175,6 +175,8 @@ class ArgsBase:
     """Whether to use q_network for target_network's action selection"""
     use_constraints_for_action_selection: bool = False
     """Whether to use constraint matrix for action selection"""
+    main_gamma_index: int = -1
+    """Gamma for action selection, etc"""
 
 
 
@@ -427,7 +429,8 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
 
     if args.is_tabular:
         single_env = envs.envs[0]
-        true_q_values = single_env.get_manygamma_values(gammas, gamma_to_choose=gammas[-1])
+        # true_q_values = single_env.get_manygamma_values(gammas, gamma_to_choose=gammas[-1])
+        true_q_values = single_env.get_manygamma_values(gammas, gamma_to_choose=args.main_gamma_index)
         # true_q_values = []
         # for g in gammas:
         #     # print(g)
@@ -478,6 +481,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         is_atari=args.is_atari,
         is_minatar=args.is_minatar,
         initialization_values=q_initialization,
+        main_gamma_index=args.main_gamma_index,
         # initialize_to_optimal=args.initialize_to_optimal,
         # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
@@ -500,6 +504,7 @@ poetry run pip install "stable_baselines3==2.0.0a1" "gymnasium[atari,accept-rom-
         is_atari=args.is_atari,
         is_minatar=args.is_minatar,
         initialization_values=q_initialization,
+        main_gamma_index=args.main_gamma_index,
         # initialize_to_optimal=args.initialize_to_optimal,
         # optimal_init_values=torch.tensor(true_q_values) if args.initialize_to_optimal else None,
         ).to(device)
